@@ -101,33 +101,37 @@ export default function CustomerSelector({ onSelect, allowUnsavedNew, initialVal
       return
     }
 
-    const { data, error } = await supabase
-      .from("Customers")
-      .insert([{ full_name: newName, phone_number: newPhone || null }])
-      .select()
-      .single()
+    try {
+      const { data, error } = await supabase
+        .from("Customers")
+        .insert([{ full_name: newName, phone_number: newPhone || null }])
+        .select()
+        .single()
 
-    if (error) {
-      setMessage("Failed to create customer")
-      return
+      if (error) {
+        setMessage("Failed to create customer")
+        return
+      }
+
+      // Refresh cache after creating
+      const { data: allCustomers, error: fetchError } = await supabase
+        .from("Customers")
+        .select("customer_id, full_name, phone_number")
+        .order("full_name", { ascending: true })
+      
+      if (!fetchError && allCustomers) {
+        setCustomers(allCustomers)
+        await cacheCustomers(allCustomers)
+      }
+
+      handleSelect(data)
+      setNewName("")
+      setNewPhone("")
+      setCreating(false)
+      setMessage("")
+    } catch {
+      setMessage("Network error, please try again")
     }
-
-    // Refresh cache after creating
-    const { data: allCustomers, error: fetchError } = await supabase
-      .from("Customers")
-      .select("customer_id, full_name, phone_number")
-      .order("full_name", { ascending: true })
-    
-    if (!fetchError && allCustomers) {
-      setCustomers(allCustomers)
-      await cacheCustomers(allCustomers)
-    }
-
-    handleSelect(data)
-    setNewName("")
-    setNewPhone("")
-    setCreating(false)
-    setMessage("")
   }
 
   const fieldStyle: React.CSSProperties = {
@@ -229,7 +233,9 @@ export default function CustomerSelector({ onSelect, allowUnsavedNew, initialVal
       )}
 
       {selected && !creating && (
-        <p style={{ marginTop: 8, fontSize: 13, color: "#00aa00", fontWeight: "bold" }}>✅ {selected.full_name}</p>
+        <div style={{ marginTop: 8, padding: "8px 12px", background: "#eff6ff", borderRadius: 6, fontSize: 13, color: "#0070f3", fontWeight: 500 }}>
+          Selected: {selected.full_name}
+        </div>
       )}
     </div>
   )

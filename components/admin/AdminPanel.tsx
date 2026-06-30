@@ -3,50 +3,73 @@
 import { useState, useEffect, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { Icon } from "@iconify/react"
+import dynamic from "next/dynamic"
 import { supabase } from "@/lib/supabase"
+import { apiMutate } from "@/lib/api-mutation"
+import RoleSwitcher from "@/components/RoleSwitcher"
 import { useBreakpoint } from "@/app/hooks/useBreakpoint"
+import NoClearance from "@/components/admin/NoClearance"
+import { PermissionProvider, usePermissions } from "@/lib/PermissionContext"
+import { ROLES } from "@/lib/permissions"
 
-// Admin sections
-import AddTruck from "@/components/admin/AddTruck"
-import Tricycles from "@/components/admin/Tricycles"
-import AddDriver from "@/components/admin/AddDriver"
-import ManageBrokers from "@/components/admin/ManageBrokers"
-import MonitorTrucks from "@/components/admin/MonitorTrucks"
-import ManageTrucks from "@/components/admin/ManageTrucks"
-import ManageDrivers from "@/components/admin/ManageDrivers"
-import MonitorTrips from "@/components/admin/MonitorTrips"
-import DieselManager from "@/components/admin/DieselManager"
-import StationManagers from "@/components/admin/StationManagers"
-import TruckOfficers from "@/components/admin/TruckOfficers"
-import TruckAdmins from "@/components/admin/TruckAdmins"
-import Reports from "@/components/admin/Reports"
-import Complaints from "@/components/admin/Complaints"
-import ReportModal from "@/components/ReportModal"
-import StoreOfficers from "@/components/admin/StoreOfficers"
-import CashOfficers from "@/components/admin/CashOfficers"
-import CashExpenses from "@/components/admin/CashExpenses"
-import CustomerPaymentsAdmin from "@/components/admin/CustomerPaymentsAdmin"
-import BrokerCredits from "@/components/admin/BrokerCredits"
+const SECTION_IMPORTS = {
+  "invite-users": () => import("@/components/admin/InviteUsers"),
+  "add-truck": () => import("@/components/admin/AddTruck"),
 
-const NAV_ITEMS = [
+  "manage-brokers": () => import("@/components/admin/ManageBrokers"),
+  "monitor-trucks": () => import("@/components/admin/MonitorTrucks"),
+  "manage-trucks": () => import("@/components/admin/ManageTrucks"),
+  "manage-drivers": () => import("@/components/admin/ManageDrivers"),
+  "monitor-trips": () => import("@/components/admin/MonitorTrips"),
+  "complaints": () => import("@/components/admin/Complaints"),
+  "station-managers": () => import("@/components/admin/StationManagers"),
+  "diesel-manager": () => import("@/components/admin/DieselManager"),
+  "truck-officers": () => import("@/components/admin/TruckOfficers"),
+  "truck-admins": () => import("@/components/admin/TruckAdmins"),
+  "tricycles": () => import("@/components/admin/Tricycles"),
+  "store-officers": () => import("@/components/admin/StoreOfficers"),
+  "cash-officers": () => import("@/components/admin/CashOfficers"),
+  "cash-expenses": () => import("@/components/admin/CashExpenses"),
+  "customer-payments": () => import("@/components/admin/CustomerPaymentsAdmin"),
+  "credit": () => import("@/components/admin/BrokerCredits"),
+  "reports": () => import("@/components/admin/Reports"),
+} as const
+
+type SectionKey = keyof typeof SECTION_IMPORTS
+
+const SECTION_KEYS = new Set(Object.keys(SECTION_IMPORTS) as SectionKey[])
+const isSectionKey = (value: string | null): value is SectionKey =>
+  !!value && SECTION_KEYS.has(value as SectionKey)
+
+type NavItemConfig = { label: string; key: SectionKey; icon: string }
+
+const SECTION_COMPONENTS: Partial<Record<SectionKey, React.ComponentType<any>>> = {}
+for (const key of Object.keys(SECTION_IMPORTS) as SectionKey[]) {
+  SECTION_COMPONENTS[key] = dynamic(SECTION_IMPORTS[key])
+}
+
+const ReportModal = dynamic(() => import("@/components/ReportModal"))
+
+const NAV_ITEMS: NavItemConfig[] = [
+  { label: "Invite Users",     key: "invite-users",        icon: "mdi:account-plus-outline" },
   { label: "Add New Truck",     key: "add-truck",          icon: "mdi:truck-plus" },
-  { label: "Add New Driver",    key: "add-driver",          icon: "mdi:account-plus" },
+
   { label: "Manage Brokers",    key: "manage-brokers",      icon: "mdi:handshake" },
-  { label: "Monitor Trucks",    key: "monitor-trucks",      icon: "mdi:dump-truck" },
-  { label: "Manage Trucks",     key: "manage-trucks",       icon: "mdi:bus-wrench" },
   { label: "Manage Drivers",    key: "manage-drivers",      icon: "mdi:account-group" },
-  { label: "Monitor Trips",     key: "monitor-trips",       icon: "streamline-ultimate:trip-road-bold" },
-  { label: "Complaints",        key: "complaints",          icon: "mdi:alert-circle" },
+  { label: "Manage Trucks",     key: "manage-trucks",       icon: "mdi:bus-wrench" },
   { label: "Station Managers",  key: "station-managers",    icon: "mdi:person-tie" },
-  { label: "Diesel Manager",    key: "diesel-manager",      icon: "mdi:gas-station" },
   { label: "Truck Officers",    key: "truck-officers",      icon: "wpf:maintenance" },
   { label: "Truck Admins",      key: "truck-admins",        icon: "mdi:person-star" },
-  { label: "Tricycles",         key: "tricycles",           icon: "mdi:rickshaw" },
   { label: "Store Officers",    key: "store-officers",      icon: "mdi:storefront" },
   { label: "Cash Officers",     key: "cash-officers",       icon: "mdi:account-tie" },
-  { label: "Cash Expenses",     key: "cash-expenses",       icon: "mdi:cash-multiple" },
+  { label: "Tricycles",         key: "tricycles",           icon: "mdi:rickshaw" },
+  { label: "Monitor Trucks",    key: "monitor-trucks",      icon: "mdi:dump-truck" },
+  { label: "Monitor Trips",     key: "monitor-trips",       icon: "streamline-ultimate:trip-road-bold" },
+  { label: "Diesel Manager",    key: "diesel-manager",      icon: "mdi:gas-station" },
   { label: "Customer Payments", key: "customer-payments",   icon: "mdi:cash-register" },
   { label: "Credit",            key: "credit",              icon: "mdi:credit-card-outline" },
+  { label: "Cash Expenses",     key: "cash-expenses",       icon: "mdi:cash-multiple" },
+  { label: "Complaints",        key: "complaints",          icon: "mdi:alert-circle" },
   { label: "Reports",           key: "reports",             icon: "mdi:chart-bar" },
 ]
 
@@ -65,19 +88,34 @@ type Props = {
   }
 }
 
-export default function AdminPanel({ userProfile }: Props) {
+function AdminPanelContent({ userProfile }: Props) {
   const bp = useBreakpoint()
   const isMobile = bp === "mobile"
   const isTablet = bp === "tablet"
   const isNarrow = isMobile || isTablet
 
   const router = useRouter()
-  const [active, setActive] = useState("")
+  const [active, setActive] = useState<SectionKey | "">("")
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [showReportModal, setShowReportModal] = useState(false)
   const bannerRef = useRef<HTMLDivElement>(null)
   const [bannerHeight, setBannerHeight] = useState(64)
+  const { sections, getAccess, loading: permLoading, userRoles, activeRole, setActiveRole } = usePermissions()
+  const effectiveRole = activeRole ?? userProfile.role
+  const isViewOnly = effectiveRole ? (ROLES[effectiveRole]?.access === "view") : false
+
+  // Profile picture state
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [profilePicUrl, setProfilePicUrl] = useState<string | undefined>(userProfile.profile_picture_url)
+  const [showPictureModal, setShowPictureModal] = useState(false)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [picturePreview, setPicturePreview] = useState<string | null>(null)
+  const [pictureLoading, setPictureLoading] = useState(false)
+  const [pictureError, setPictureError] = useState("")
+
+  // Filter nav items based on user permissions
+  const visibleNavItems = NAV_ITEMS.filter(item => sections.includes(item.key))
 
   // Measure actual banner height for mobile drawer offset
   useEffect(() => {
@@ -101,19 +139,33 @@ export default function AdminPanel({ userProfile }: Props) {
   }, [])
 
   useEffect(() => {
+    if (permLoading) return
+
+    const canViewTrips = getAccess("monitor-trips").canView
+    const canViewComplaints = getAccess("complaints").canView
+    const canViewFuel = getAccess("diesel-manager").canView
+
     async function checkAlerts() {
       try {
-        const { count: disputed } = await supabase
-          .from("Stops").select("*", { count: "exact", head: true }).eq("disputed", true)
-        setDisputedCount(disputed || 0)
+        if (canViewTrips) {
+          const { count: disputed } = await supabase
+            .from("Stops").select("*", { count: "exact", head: true }).eq("disputed", true)
+          setDisputedCount(disputed || 0)
+        }
 
-        const { count: complaints } = await supabase
-          .from("driver_complaints").select("*", { count: "exact", head: true }).eq("resolved", false)
-        setUnresolvedComplaints(complaints || 0)
+        if (canViewComplaints) {
+          const { count: driverComplaints } = await supabase
+            .from("driver_complaints").select("*", { count: "exact", head: true }).eq("resolved", false)
+          const { count: userReports } = await supabase
+            .from("reports").select("*", { count: "exact", head: true }).eq("resolved", false)
+          setUnresolvedComplaints((driverComplaints || 0) + (userReports || 0))
+        }
 
-        const { data } = await supabase
-          .from("fuel_companies").select("company_id, company_name, current_balance, low_balance_threshold")
-        if (data) setLowBalanceCompanies(data.filter(c => c.current_balance < c.low_balance_threshold))
+        if (canViewFuel) {
+          const { data } = await supabase
+            .from("fuel_companies").select("company_id, company_name, current_balance, low_balance_threshold")
+          if (data) setLowBalanceCompanies(data.filter(c => c.current_balance < c.low_balance_threshold))
+        }
       } catch (err) {
         console.error("Error checking alerts:", err)
       }
@@ -121,7 +173,7 @@ export default function AdminPanel({ userProfile }: Props) {
     checkAlerts()
     const interval = setInterval(checkAlerts, 30000)
     return () => clearInterval(interval)
-  }, [])
+  }, [permLoading])
 
   useEffect(() => {
     if (!isNarrow) setDrawerOpen(false)
@@ -135,12 +187,14 @@ export default function AdminPanel({ userProfile }: Props) {
 
   const visibleAlerts = lowBalanceCompanies.filter(c => !dismissedAlerts.has(c.company_id))
 
-  // Sync initial section from URL
+  // Sync initial section from URL and preload its chunk
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const section = params.get('section')
-    const validKeys = NAV_ITEMS.map(n => n.key)
-    if (section && validKeys.includes(section)) setActive(section)
+    if (isSectionKey(section)) {
+      setActive(section)
+      SECTION_IMPORTS[section]()
+    }
   }, [])
 
   // Handle browser back/forward between sections
@@ -148,15 +202,15 @@ export default function AdminPanel({ userProfile }: Props) {
     const handlePopState = () => {
       const params = new URLSearchParams(window.location.search)
       const section = params.get('section')
-      const validKeys = NAV_ITEMS.map(n => n.key)
-      if (section && validKeys.includes(section)) setActive(section)
+      setActive(isSectionKey(section) ? section : "")
     }
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
   }, [])
 
-  function navigate(key: string) {
+  function navigate(key: SectionKey) {
     setActive(key)
+    SECTION_IMPORTS[key]()
     if (isNarrow) setDrawerOpen(false)
     window.history.pushState(null, '', `${window.location.pathname}?section=${key}`)
   }
@@ -166,38 +220,87 @@ export default function AdminPanel({ userProfile }: Props) {
     router.push("/login")
   }
 
-  const activeLabel = NAV_ITEMS.find(n => n.key === active)?.label ?? "Admin Panel"
+  function handleAvatarClick() {
+    setPictureError("")
+    setPicturePreview(null)
+    setSelectedFile(null)
+    setShowPictureModal(true)
+  }
 
-  const roleDisplay = userProfile.role === "TruckAdmin" ? "Truck Admin" : userProfile.role
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.type.startsWith("image/")) { setPictureError("Please select an image file"); return }
+    if (file.size > 1024 * 1024) { setPictureError("Image must be less than 1MB"); return }
+    setSelectedFile(file)
+    setPictureError("")
+    const reader = new FileReader()
+    reader.onload = (event) => setPicturePreview(event.target?.result as string)
+    reader.readAsDataURL(file)
+  }
+
+  async function handleUploadPicture() {
+    if (!selectedFile) { setPictureError("Please select an image"); return }
+    setPictureLoading(true)
+    setPictureError("")
+    let uploadedPath: string | null = null
+    let profileSaved = false
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { setPictureError("Session expired"); setPictureLoading(false); return }
+      const fileExt = selectedFile.name.split(".").pop()
+      const fileName = `${userProfile.user_id}-${Date.now()}.${fileExt}`
+      const filePath = `${userProfile.user_id}/${fileName}`
+      const { error: uploadError } = await supabase.storage.from("profile-pictures").upload(filePath, selectedFile, { upsert: false })
+      if (uploadError) { setPictureError("Upload failed"); setPictureLoading(false); return }
+      uploadedPath = filePath
+      const { data: { publicUrl } } = supabase.storage.from("profile-pictures").getPublicUrl(filePath)
+      const { error: updateError } = await apiMutate("admin", { action: "update", table: "Profiles", data: { profile_picture_url: publicUrl }, filters: { user_id: userProfile.user_id } })
+      if (updateError) {
+        await supabase.storage.from("profile-pictures").remove([filePath])
+        setPictureError("Failed to save profile")
+        setPictureLoading(false)
+        return
+      }
+      profileSaved = true
+      if (profilePicUrl) {
+        const oldPath = profilePicUrl.split("/").slice(-2).join("/")
+        await supabase.storage.from("profile-pictures").remove([oldPath])
+      }
+      setProfilePicUrl(publicUrl)
+      setPictureLoading(false)
+      setShowPictureModal(false)
+      setSelectedFile(null)
+      setPicturePreview(null)
+    } catch (err) {
+      if (uploadedPath && !profileSaved) {
+        try { await supabase.storage.from("profile-pictures").remove([uploadedPath]) } catch {}
+      }
+      setPictureError("Something went wrong")
+      setPictureLoading(false)
+    }
+  }
+
+  const activeItem = NAV_ITEMS.find(n => n.key === active)
+  const activeLabel = activeItem?.label ?? "Admin Panel"
 
   function renderContent() {
-    switch (active) {
-      case "add-truck":          return <AddTruck />
-      case "add-driver":         return <AddDriver />
-      case "manage-brokers":     return <ManageBrokers />
-      case "monitor-trucks":     return <MonitorTrucks />
-      case "manage-trucks":      return <ManageTrucks />
-      case "manage-drivers":     return <ManageDrivers />
-      case "monitor-trips":      return <MonitorTrips />
-      case "complaints":         return <Complaints />
-      case "station-managers":   return <StationManagers />
-      case "diesel-manager":     return <DieselManager />
-      case "truck-officers":     return <TruckOfficers />
-      case "truck-admins":       return <TruckAdmins />
-      case "tricycles":          return <Tricycles />
-      case "store-officers":     return <StoreOfficers />
-      case "cash-officers":      return <CashOfficers />
-      case "cash-expenses":      return <CashExpenses />
-      case "customer-payments":  return <CustomerPaymentsAdmin />
-      case "credit":             return <BrokerCredits />
-      case "reports":            return <Reports />
-      default: return (
-        <div>
-          <h1 style={{ marginBottom: 8, fontSize: isMobile ? 22 : 28, color: "#171717" }}>Welcome, Admin</h1>
-          <p style={{ color: "#888", fontSize: 15 }}>Select a section from the {isNarrow ? "menu" : "sidebar"}.</p>
-        </div>
-      )
+    if (active) {
+      if (permLoading) return null
+      const access = getAccess(active)
+      if (!access.canView) {
+        return <NoClearance sectionLabel={activeLabel} />
+      }
     }
+
+    const Component = active ? SECTION_COMPONENTS[active] : undefined
+    if (Component) return <Component />
+    return (
+      <div>
+        <h1 style={{ marginBottom: 8, fontSize: isMobile ? 22 : 28, color: "#171717" }}>Welcome, Admin</h1>
+        <p style={{ color: "#888", fontSize: 15 }}>Select a section from the {isNarrow ? "menu" : "sidebar"}.</p>
+      </div>
+    )
   }
 
   function NavItem({ item, showLabel }: { item: typeof NAV_ITEMS[0]; showLabel: boolean }) {
@@ -300,28 +403,52 @@ export default function AdminPanel({ userProfile }: Props) {
         }}>
           <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", gap: isMobile ? 12 : 16, justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 12 : 16 }}>
-              <div style={{
-                width: isMobile ? 40 : 48,
-                height: isMobile ? 40 : 48,
-                borderRadius: "50%",
-                background: "rgba(255,255,255,0.15)",
-                border: "2px solid rgba(255,255,255,0.2)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                overflow: "hidden",
-                transition: "all 0.2s",
-              }}>
-                <span style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, color: "#fff" }}>
-                  {userProfile.full_name.charAt(0).toUpperCase()}
-                </span>
+              <div
+                onClick={handleAvatarClick}
+                style={{
+                  width: isMobile ? 40 : 48,
+                  height: isMobile ? 40 : 48,
+                  borderRadius: "50%",
+                  background: profilePicUrl ? "transparent" : "rgba(255,255,255,0.15)",
+                  border: "2px solid rgba(255,255,255,0.2)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  flexShrink: 0,
+                  cursor: "pointer",
+                  overflow: "hidden",
+                  transition: "all 0.2s",
+                  position: "relative",
+                }}
+                onMouseEnter={e => { e.currentTarget.style.borderColor = "#fff"; e.currentTarget.style.transform = "scale(1.05)" }}
+                onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)"; e.currentTarget.style.transform = "scale(1)" }}
+              >
+                {profilePicUrl ? (
+                  <img src={profilePicUrl} alt={userProfile.full_name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  <span style={{ fontSize: isMobile ? 18 : 20, fontWeight: 700, color: "#fff" }}>
+                    {userProfile.full_name.charAt(0).toUpperCase()}
+                  </span>
+                )}
+                <div style={{ position: "absolute", inset: 0, background: "rgba(0, 0, 0, 0.4)", display: "flex", alignItems: "center", justifyContent: "center", opacity: 0, transition: "opacity 0.2s" }} onMouseEnter={e => e.currentTarget.style.opacity = "1"} onMouseLeave={e => e.currentTarget.style.opacity = "0"}>
+                  <Icon icon="mdi:camera" width={16} color="white" />
+                </div>
               </div>
               <div>
                 <h1 style={{ margin: 0, fontSize: isMobile ? 15 : 18, fontWeight: 700, color: "#fff" }}>
                   {userProfile.full_name}
                 </h1>
-                <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{roleDisplay}</p>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <RoleSwitcher currentRole={effectiveRole} style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.7)" }} onRoleSwitch={(r) => setActiveRole(r)} />
+                  {isViewOnly && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                      letterSpacing: "0.5px", padding: "2px 6px", borderRadius: 4,
+                      background: "rgba(245, 158, 11, 0.2)", color: "#fbbf24",
+                      border: "1px solid rgba(245, 158, 11, 0.3)", lineHeight: "14px"
+                    }}>View-Only</span>
+                  )}
+                </div>
               </div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 12 }}>
@@ -428,7 +555,7 @@ export default function AdminPanel({ userProfile }: Props) {
               {/* Nav items */}
               <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", paddingBottom: 16 }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingLeft: sidebarOpen ? 8 : 0 }}>
-                  {NAV_ITEMS.map(item => (
+                  {visibleNavItems.map(item => (
                     <NavItem key={item.key} item={item} showLabel={sidebarOpen} />
                   ))}
                 </div>
@@ -507,7 +634,7 @@ export default function AdminPanel({ userProfile }: Props) {
               }}>
                 <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden", padding: "8px 8px" }}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {NAV_ITEMS.map(item => (
+                    {visibleNavItems.map(item => (
                       <NavItem key={item.key} item={item} showLabel={true} />
                     ))}
                   </div>
@@ -614,8 +741,66 @@ export default function AdminPanel({ userProfile }: Props) {
         isOpen={showReportModal}
         onClose={() => setShowReportModal(false)}
         userId={userProfile.user_id}
-        userRole={userProfile.role}
+        userRole={effectiveRole}
       />
+
+      {/* Profile Picture Upload Modal */}
+      {showPictureModal && (
+        <div onClick={() => { setShowPictureModal(false); setSelectedFile(null); setPicturePreview(null); setPictureError("") }} style={{
+          position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.6)",
+          backdropFilter: "blur(4px)",
+          display: "flex", alignItems: isMobile ? "flex-end" : "center",
+          justifyContent: "center", zIndex: 100, padding: isMobile ? 0 : 24
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            background: "white",
+            borderRadius: isMobile ? "20px 20px 0 0" : 12,
+            padding: isMobile ? "28px 20px" : 32,
+            width: "100%",
+            maxWidth: 480,
+            maxHeight: "90vh",
+            overflowY: "auto",
+            boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)"
+          }}>
+            <h3 style={{ margin: "0 0 6px 0", fontSize: 20, fontWeight: 700, color: "#0f172a" }}>Update Profile Picture</h3>
+            <p style={{ margin: "0 0 20px 0", fontSize: 13, color: "#64748b" }}>PNG, JPG up to 1MB</p>
+
+            {picturePreview ? (
+              <div style={{ marginBottom: 20 }}>
+                <p style={{ margin: "0 0 8px 0", fontSize: 13, fontWeight: 600, color: "#0f172a" }}>Preview</p>
+                <img src={picturePreview} alt="Preview" style={{ width: "100%", height: 200, objectFit: "cover", borderRadius: 12, border: "2px solid #e2e8f0" }} />
+              </div>
+            ) : (
+              <div onClick={() => fileInputRef.current?.click()} style={{ border: "2px dashed #0070f3", borderRadius: 12, padding: "32px 16px", cursor: "pointer", background: "#f0f7ff", transition: "all 0.2s", marginBottom: 20, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }} onMouseEnter={e => { e.currentTarget.style.background = "#e0efff"; e.currentTarget.style.borderColor = "#0055d4" }} onMouseLeave={e => { e.currentTarget.style.background = "#f0f7ff"; e.currentTarget.style.borderColor = "#0070f3" }}>
+                <Icon icon="mdi:cloud-upload" width={40} height={40} color="#0070f3" style={{ marginBottom: 8 }} />
+                <p style={{ margin: "0 0 4px 0", fontSize: 14, fontWeight: 700, color: "#0070f3" }}>Click to upload</p>
+                <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>or drag and drop</p>
+              </div>
+            )}
+
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFileSelect} style={{ display: "none" }} />
+
+            {pictureError && <div style={{ padding: 12, background: "#fef2f2", borderLeft: "4px solid #ef4444", borderRadius: 4, marginBottom: 16, color: "#b91c1c", fontSize: 13, fontWeight: 600 }}>{pictureError}</div>}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button onClick={() => { setShowPictureModal(false); setSelectedFile(null); setPicturePreview(null); setPictureError("") }} style={{ padding: "12px 16px", background: "white", border: "1px solid #cbd5e1", color: "#475569", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 15, minHeight: 44 }}>
+                Cancel
+              </button>
+              <button onClick={handleUploadPicture} disabled={pictureLoading || !selectedFile} style={{ padding: "12px 16px", background: selectedFile ? "#0070f3" : "#bfdbfe", color: "white", border: "none", borderRadius: 8, cursor: selectedFile && !pictureLoading ? "pointer" : "not-allowed", fontWeight: 700, fontSize: 15, minHeight: 44, opacity: pictureLoading ? 0.7 : 1, transition: "opacity 0.2s" }}>
+                {pictureLoading ? "Uploading..." : "Upload"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
+  )
+}
+
+export default function AdminPanel({ userProfile }: Props) {
+  return (
+    <PermissionProvider userId={userProfile.user_id}>
+      <AdminPanelContent userProfile={userProfile} />
+    </PermissionProvider>
   )
 }

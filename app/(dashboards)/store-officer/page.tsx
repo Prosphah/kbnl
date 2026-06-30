@@ -3,6 +3,8 @@
 import { useEffect, useState, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
+import { apiMutate } from "@/lib/api-mutation"
+import RoleSwitcher from "@/components/RoleSwitcher"
 import { formatAmount, parseAmount } from "@/lib/formatAmount"
 import { Icon } from "@iconify/react"
 import CustomerSelector from "@/components/CustomerSelector"
@@ -140,6 +142,7 @@ export default function StoreOfficerDashboard() {
     return new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds()).toISOString()
   }
 
+  const [updatedStockProducts, setUpdatedStockProducts] = useState<string[]>([])
   const [salesFilter, setSalesFilter] = useState("All")
   const [salesDateFilter, setSalesDateFilter] = useState("")
   const [salesSortByAdded, setSalesSortByAdded] = useState(true)
@@ -166,25 +169,34 @@ export default function StoreOfficerDashboard() {
     if (!session) { router.push("/login"); return }
 
     const { data: profile } = await supabase
-      .from("Profiles").select("role").eq("user_id", session.user.id).single()
-    if (profile?.role !== "StoreOfficer") { router.push("/login"); return }
+      .from("Profiles").select("full_name").eq("user_id", session.user.id).single()
 
-    const { data: officerData } = await supabase
-      .from("store_officers")
-      .select("officer_id, full_name, store_name, profile_picture_url")
-      .eq("officer_id", session.user.id)
-      .single()
-    if (!officerData) { router.push("/login"); return }
+    let storeName = ""
+    let officerId = session.user.id
 
-    setOfficer(officerData)
+    if (profile) {
+      const { data: officerData } = await supabase
+        .from("store_officers")
+        .select("officer_id, full_name, store_name, profile_picture_url")
+        .eq("officer_id", session.user.id)
+        .single()
+
+      if (officerData) {
+        setOfficer(officerData)
+        storeName = officerData.store_name
+        officerId = officerData.officer_id
+      } else {
+        setOfficer({ officer_id: session.user.id, full_name: profile.full_name, store_name: "" })
+      }
+    }
 
     const { data: productsData } = await supabase.rpc("get_products")
     if (productsData) setAllProducts(productsData.map((r: { value: string }) => r.value))
 
     await Promise.all([
-      fetchPendingStops(officerData.store_name),
-      fetchStock(officerData.store_name),
-      fetchSales(officerData.officer_id),
+      fetchPendingStops(storeName),
+      fetchStock(storeName),
+      fetchSales(officerId),
       fetchTricycles(),
       fetchTrucks(),
       fetchBrokers(),
@@ -248,6 +260,7 @@ export default function StoreOfficerDashboard() {
       .from("store_sales")
       .select("sale_id, product, quantity, price_per_bag, total_amount, customer_name, payment_mode, delivery_mode, tricycle_id, truck_plate, sold_at, created_at, broker_id, status")
       .eq("officer_id", officerId)
+      .order("sold_at", { ascending: false })
 
     if (!data) return
 
@@ -324,29 +337,30 @@ export default function StoreOfficerDashboard() {
 
     setConfirmLoading(true)
 
-    const { data: confirmation, error: confError } = await supabase
-      .from("store_supply_confirmations")
-      .insert([{
-        stop_id: confirmingStop.stop_id,
-        officer_id: officer.officer_id,
-        store_name: officer.store_name,
-      }])
-      .select()
-      .single()
+    const { data: confirmation, error: confError } = await apiMutate("finance", {
+      action: "insert", table: "store_supply_confirmations",
+      data: { stop_id: confirmingStop.stop_id, officer_id: officer.officer_id, store_name: officer.store_name },
+    })
 
     if (confError || !confirmation) { setConfirmError("Failed to confirm supply"); setConfirmLoading(false); return }
+    const confData = Array.isArray(confirmation) ? confirmation[0] : confirmation
 
-    const { error: linesError } = await supabase
-      .from("store_supply_lines")
-      .insert(supplyLines.map(l => ({
-        confirmation_id: confirmation.confirmation_id,
-        product: l.product,
-        quantity: parseInt(l.quantity),
-      })))
+    for (const line of supplyLines) {
+      const { error: linesError } = await apiMutate("finance", {
+        action: "insert", table: "store_supply_lines",
+        data: { confirmation_id: confData.confirmation_id, product: line.product, quantity: parseInt(line.quantity) },
+      })
+      if (linesError) { setConfirmError("Supply confirmed but product lines failed"); setConfirmLoading(false); return }
+    }
 
-    if (linesError) { setConfirmError("Supply confirmed but product lines failed"); setConfirmLoading(false); return }
-
-    await supabase.from("Stops").update({ confirmed: true }).eq("stop_id", confirmingStop.stop_id)
+    const { error: stopError } = await apiMutate("trips", {
+      action: "update", table: "Stops", data: { confirmed: true }, filters: { stop_id: confirmingStop.stop_id },
+    })
+    if (stopError) {
+      setConfirmError("Supply and lines saved but stop update failed. Contact support.")
+      setConfirmLoading(false)
+      return
+    }
 
     for (const line of supplyLines) {
       const qty = parseInt(line.quantity)
@@ -358,15 +372,26 @@ export default function StoreOfficerDashboard() {
         .single()
 
       if (existing) {
-        await supabase
-          .from("store_stock")
-          .update({ balance: existing.balance + qty, updated_at: new Date().toISOString() })
-          .eq("store_name", officer.store_name)
-          .eq("product", line.product)
+        const { error: stockError } = await apiMutate("finance", {
+          action: "update", table: "store_stock",
+          data: { balance: existing.balance + qty, updated_at: new Date().toISOString() },
+          filters: { store_name: officer.store_name, product: line.product },
+        })
+        if (stockError) {
+          setConfirmError("Supply confirmed but stock update failed. Contact support.")
+          setConfirmLoading(false)
+          return
+        }
       } else {
-        await supabase
-          .from("store_stock")
-          .insert([{ store_name: officer.store_name, product: line.product, balance: qty }])
+        const { error: stockError } = await apiMutate("finance", {
+          action: "insert", table: "store_stock",
+          data: { store_name: officer.store_name, product: line.product, balance: qty },
+        })
+        if (stockError) {
+          setConfirmError("Supply confirmed but stock insert failed. Contact support.")
+          setConfirmLoading(false)
+          return
+        }
       }
     }
 
@@ -378,6 +403,8 @@ export default function StoreOfficerDashboard() {
       fetchPendingStops(officer.store_name),
       fetchStock(officer.store_name),
     ])
+    setUpdatedStockProducts(supplyLines.map(l => l.product))
+    setTimeout(() => setUpdatedStockProducts([]), 3000)
   }
 
   function addSaleLine() {
@@ -400,7 +427,10 @@ export default function StoreOfficerDashboard() {
     // Validate lines
     if (saleLines.some(l => !l.product)) return setSaleError("Select a product for each line")
     if (saleLines.some(l => !l.quantity || parseInt(l.quantity) <= 0)) return setSaleError("Enter a valid quantity for each line")
-    
+
+    const saleProducts = saleLines.map(l => l.product)
+    if (new Set(saleProducts).size !== saleProducts.length) return setSaleError("Duplicate products — merge them")
+
     if (!salePayment) return setSaleError("Select a payment mode")
     if (deliveryMode === "tricycle" && !saleTricycleId) return setSaleError("Select a tricycle")
     if (deliveryMode === "truck" && !saleTruckPlate) return setSaleError("Select a truck")
@@ -448,7 +478,14 @@ export default function StoreOfficerDashboard() {
         sold_at: saleDateWithTime(saleDate),
       }))
   
-      const { error: saleErr } = await supabase.from("store_sales").insert(salesToInsert)
+      // Insert one row per product line (batch insert not supported, insert individually)
+      let saleErr: string | null = null
+      for (const sale of salesToInsert) {
+        const { error } = await apiMutate("finance", {
+          action: "insert", table: "store_sales", data: sale,
+        })
+        if (error) { saleErr = error; break }
+      }
       if (saleErr) {
         setSaleError("Failed to log sales")
         setSaleLoading(false)
@@ -459,13 +496,18 @@ export default function StoreOfficerDashboard() {
       for (const line of saleLines) {
         const stockItem = stock.find(s => s.product === line.product)
         if (!stockItem) continue
-  
+
         const qty = parseInt(line.quantity)
-        await supabase
-          .from("store_stock")
-          .update({ balance: stockItem.balance - qty, updated_at: new Date().toISOString() })
-          .eq("store_name", officer.store_name)
-          .eq("product", line.product)
+        const { error: stockError } = await apiMutate("finance", {
+          action: "update", table: "store_stock",
+          data: { balance: stockItem.balance - qty, updated_at: new Date().toISOString() },
+          filters: { store_name: officer.store_name, product: line.product },
+        })
+        if (stockError) {
+          setSaleError("Sale logged but stock deduction failed. Contact support.")
+          setSaleLoading(false)
+          return
+        }
       }
   
       setSaleLoading(false)
@@ -539,11 +581,6 @@ export default function StoreOfficerDashboard() {
       const fileName = `${officer.officer_id}-${Date.now()}.${fileExt}`
       const filePath = `${officer.officer_id}/${fileName}`
 
-      if (officer.profile_picture_url) {
-        const oldPath = officer.profile_picture_url.split("/").slice(-2).join("/")
-        await supabase.storage.from("profile-pictures").remove([oldPath])
-      }
-
       const { error: uploadError } = await supabase.storage
         .from("profile-pictures")
         .upload(filePath, selectedFile, { upsert: false })
@@ -554,12 +591,23 @@ export default function StoreOfficerDashboard() {
         .from("profile-pictures")
         .getPublicUrl(filePath)
 
-      const { error: updateError } = await supabase
-        .from("store_officers")
-        .update({ profile_picture_url: publicUrl })
-        .eq("officer_id", officer.officer_id)
+      const { error: updateError } = await apiMutate("finance", {
+        action: "update", table: "store_officers",
+        data: { profile_picture_url: publicUrl },
+        filters: { officer_id: officer.officer_id },
+      })
 
-      if (updateError) { setPictureError("Failed to save profile"); setPictureLoading(false); return }
+      if (updateError) {
+        await supabase.storage.from("profile-pictures").remove([filePath])
+        setPictureError("Failed to save profile")
+        setPictureLoading(false)
+        return
+      }
+
+      if (officer.profile_picture_url) {
+        const oldPath = officer.profile_picture_url.split("/").slice(-2).join("/")
+        await supabase.storage.from("profile-pictures").remove([oldPath])
+      }
 
       setOfficer({ ...officer, profile_picture_url: publicUrl })
 
@@ -575,7 +623,7 @@ export default function StoreOfficerDashboard() {
 
   const groupedSales = sales.reduce<GroupedSale[]>((groups, sale) => {
     const groupId = [
-      sale.sold_at,
+      sale.sold_at.split("T")[0],
       sale.customer_name ?? "",
       sale.payment_mode,
       sale.delivery_mode,
@@ -626,7 +674,7 @@ export default function StoreOfficerDashboard() {
       const bCreated = b.lines[0]?.created_at || b.sold_at
       return bCreated.localeCompare(aCreated)
     } else {
-      return b.sold_at.localeCompare(a.sold_at)
+      return b.sold_at.split("T")[0].localeCompare(a.sold_at.split("T")[0])
     }
   })
   const paymentFilters = PAYMENT_MODES.filter(mode => sales.some(sale => sale.payment_mode === mode))
@@ -643,7 +691,8 @@ export default function StoreOfficerDashboard() {
   if (loading) return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
       <div style={{ width: 40, height: 40, borderRadius: "50%", border: "3px solid #e2e8f0", borderTopColor: "#0070f3", animation: "spin 1s linear infinite" }} />
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes pulseGlow { 0%, 100% { box-shadow: 0 0 5px rgba(16, 185, 129, 0.3); border-color: #6ee7b7; } 50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.6); border-color: #34d399; } }`}</style>
     </div>
   )
 
@@ -716,9 +765,7 @@ export default function StoreOfficerDashboard() {
               <h1 style={{ margin: 0, fontSize: isMobile ? fontSize.lg : fontSize.xl, fontWeight: 700, color: "#0070f3" }}>
                 {officer?.full_name}
               </h1>
-              <p style={{ margin: "2px 0 0", fontSize: fontSize.sm, color: "#64748b" }}>
-                {officer?.store_name}
-              </p>
+              <RoleSwitcher currentRole="StoreOfficer" style={{ margin: "2px 0 0", fontSize: fontSize.sm, color: "#64748b" }} />
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -757,14 +804,24 @@ export default function StoreOfficerDashboard() {
             ? <p style={{ color: "#64748b", fontSize: fontSize.base, margin: 0 }}>No stock recorded yet.</p>
             : (
               <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
-                {stock.map(s => (
-                  <div key={s.product} style={{ background: "#f0f7ff", border: "1.5px solid #bfdbfe", borderRadius: 8, padding: "12px 14px" }}>
+                {stock.map(s => {
+                  const isUpdated = updatedStockProducts.includes(s.product)
+                  return (
+                  <div key={s.product} style={{
+                    background: "#f0f7ff",
+                    border: `1.5px solid ${isUpdated ? "#6ee7b7" : "#bfdbfe"}`,
+                    borderRadius: 8,
+                    padding: "12px 14px",
+                    animation: isUpdated ? "pulseGlow 0.6s ease 3" : undefined,
+                    transition: "box-shadow 0.3s, border-color 0.3s",
+                  }}>
                     <p style={{ margin: 0, fontSize: fontSize.xs, color: "#64748b" }}>{s.product}</p>
                     <p style={{ margin: "6px 0 0", fontWeight: 700, fontSize: fontSize["2xl"], color: s.balance === 0 ? "#ef4444" : s.balance < 50 ? "#f5a623" : "#0070f3" }}>
                       {s.balance}<span style={{ fontSize: fontSize.xs, fontWeight: 500, color: "#64748b", marginLeft: 4 }}>bags</span>
                     </p>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             )
           }
@@ -1078,6 +1135,7 @@ export default function StoreOfficerDashboard() {
                     placeholder="Qty"
                     value={line.quantity}
                     onChange={e => updateSupplyLine(i, "quantity", e.target.value)}
+                    onKeyDown={(e: any) => { if (e.key === "-" || e.key === "e") e.preventDefault() }}
                     style={{ flex: 1, width: isMobile ? 90 : 110, flexShrink: 0, padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box" }}
                   />
                   {supplyLines.length > 1 && (

@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react"
 import { supabase } from "@/lib/supabase"
+import { apiMutate } from "@/lib/api-mutation"
+import { Icon } from "@iconify/react"
 
 type FuelCompany = {
   company_id: string
@@ -43,11 +45,14 @@ export default function BuyDiesel({ driverId, onBack }: Props) {
         .in("trip_status", ["In transit", "On hold"])
       ).data?.map(t => t.plate_number) || []
 
+      const excludeList = activeTripPlates.length
+        ? `(${activeTripPlates.map((p) => `"${p}"`).join(",")})`
+        : `("NULL")`
       const { data: trucksData } = await supabase
         .from("Trucks")
         .select("plate_number")
         .eq("status", "Empty")
-        .not("plate_number", "in", `(${activeTripPlates.join(",") || "NULL"})`)
+        .not("plate_number", "in", excludeList)
         .order("plate_number", { ascending: true })
 
       setTrucks(trucksData || [])
@@ -66,30 +71,34 @@ export default function BuyDiesel({ driverId, onBack }: Props) {
     if (!rate || isNaN(Number(rate)) || Number(rate) <= 0) return setMessage("Enter valid rate per litre")
 
     setSubmitting(true)
-    const { error } = await supabase
-      .from("fuel_requests")
-      .insert([{
-        driver_id: driverId,
-        company_id: companyId,
-        litres: Number(litres),
-        rate_per_litre: Number(rate),
-        plate_number: selectedPlate,
-      }])
-
-    if (error) {
+    try {
+      const { error } = await apiMutate("fuel", {
+        action: "insert",
+        table: "fuel_requests",
+        data: {
+          driver_id: driverId,
+          company_id: companyId,
+          litres: Number(litres),
+          rate_per_litre: Number(rate),
+          plate_number: selectedPlate,
+        },
+      })
+      if (error) {
+        setMessage("Failed to submit request. Try again.")
+        return
+      }
+      setSubmitted(true)
+    } catch {
       setMessage("Failed to submit request. Try again.")
+    } finally {
       setSubmitting(false)
-      return
     }
-
-    setSubmitting(false)
-    setSubmitted(true)
   }
 
   if (submitted) {
     return (
       <div style={{ textAlign: "center", paddingTop: 60 }}>
-        <p style={{ fontSize: 48, marginBottom: 16 }}>✅</p>
+        <Icon icon="mdi:check-circle" width={48} height={48} color="#16a34a" style={{ marginBottom: 16 }} />
         <h2 style={{ marginBottom: 8 }}>Request Submitted</h2>
         <p style={{ color: "#888", marginBottom: 40 }}>
           Your diesel request has been sent. The station manager will validate it.

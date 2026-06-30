@@ -3,7 +3,9 @@
 import { useState, useEffect } from "react"
 import { Icon } from "@iconify/react"
 import { supabase } from "@/lib/supabase"
+import { apiMutate } from "@/lib/api-mutation"
 import ReassignBroker from "@/components/admin/ReassignBroker"
+import { usePermissions } from "@/lib/PermissionContext"
 
 type Stop = {
   stop_id: string
@@ -120,6 +122,8 @@ const filterOptions = ["Active", "All", "In transit", "On hold", "Completed", "D
 
 export default function MonitorTrips() {
   const { isMobile, isDesktop } = useBreakpoint()
+  const { getAccess } = usePermissions()
+  const canEdit = getAccess("monitor-trips").canEdit
   const [trips, setTrips] = useState<Trip[]>([])
   const [loading, setLoading] = useState(true)
   const [filterStatus, setFilterStatus] = useState("Active")
@@ -148,114 +152,152 @@ export default function MonitorTrips() {
 
     if (error || !tripsData) return []
 
-    const enriched = await Promise.all(
-      tripsData.map(async (trip) => {
-        const { data: driver } = await supabase
-          .from("Drivers")
-          .select("full_name, phone_number, status")
-          .eq("driver_id", trip.driver_id)
-          .single()
+    const tripIds = tripsData.map(t => t.trip_id)
 
-        const { data: stopsRaw } = await supabase
-          .from("Stops")
-          .select("stop_id, quantity_offloaded, latitude, longitude, stop_time, stop_location, broker_id, customer_id, confirmed, disputed, dispute_reason, store_name, stop_type")
-          .eq("trip_id", trip.trip_id)
-          .order("stop_time", { ascending: true })
+    const driverIds = tripsData.map(t => t.driver_id).filter(Boolean)
+    const driverMap = new Map<string, { full_name: string; phone_number: string; status: string }>()
+    if (driverIds.length > 0) {
+      const { data: driversData } = await supabase
+        .from("Drivers")
+        .select("driver_id, full_name, phone_number, status")
+        .in("driver_id", driverIds)
+      for (const d of driversData || []) driverMap.set(d.driver_id, d)
+    }
 
-        const stops: Stop[] = await Promise.all(
-          (stopsRaw || []).map(async (stop) => {
-            let broker_name = null
-            let customer_name = null
+    const { data: allStopsRaw } = await supabase
+      .from("Stops")
+      .select("stop_id, trip_id, quantity_offloaded, latitude, longitude, stop_time, stop_location, broker_id, customer_id, confirmed, disputed, dispute_reason, store_name, stop_type")
+      .in("trip_id", tripIds)
+      .order("stop_time", { ascending: true })
 
-            if (stop.stop_type === "customer") {
-              const { data: broker } = await supabase
-                .from("Brokers")
-                .select("broker_name")
-                .eq("broker_id", stop.broker_id)
-                .single()
+    const stopsByTrip = new Map<string, typeof allStopsRaw>()
+    for (const stop of allStopsRaw || []) {
+      if (!stopsByTrip.has(stop.trip_id)) stopsByTrip.set(stop.trip_id, [])
+      stopsByTrip.get(stop.trip_id)!.push(stop)
+    }
 
-              broker_name = broker?.broker_name ?? "Unknown"
+    const allStops = allStopsRaw || []
+    const brokerIds = [...new Set(allStops.filter(s => s.stop_type === "customer").map(s => s.broker_id).filter(Boolean))]
+    const brokerMap = new Map<string, { broker_name: string }>()
+    if (brokerIds.length > 0) {
+      const { data: brokersData } = await supabase
+        .from("Brokers")
+        .select("broker_id, broker_name")
+        .in("broker_id", brokerIds)
+      for (const b of brokersData || []) brokerMap.set(b.broker_id, b)
+    }
 
-              if (stop.customer_id) {
-                const { data: customerData } = await supabase
-                  .from("Customers")
-                  .select("full_name")
-                  .eq("customer_id", stop.customer_id)
-                  .single()
-                customer_name = customerData?.full_name ?? "Not provided"
-              } else {
-                customer_name = "Not provided"
-              }
-            }
+    const customerIds = [...new Set(allStops.filter(s => s.stop_type === "customer" && s.customer_id).map(s => s.customer_id).filter(Boolean))]
+    const customerMap = new Map<string, { full_name: string }>()
+    if (customerIds.length > 0) {
+      const { data: customersData } = await supabase
+        .from("Customers")
+        .select("customer_id, full_name")
+        .in("customer_id", customerIds)
+      for (const c of customersData || []) customerMap.set(c.customer_id, c)
+    }
 
-            const { data: confirmation } = await supabase
-              .from("Stop_Confirmations")
-              .select("price_per_bag")
-              .eq("stop_id", stop.stop_id)
-              .single()
+    const stopIds = allStops.map(s => s.stop_id).filter(Boolean)
+    const confirmationMap = new Map<string, { price_per_bag: number }>()
+    if (stopIds.length > 0) {
+      const { data: confirmationsData } = await supabase
+        .from("Stop_Confirmations")
+        .select("stop_id, price_per_bag")
+        .in("stop_id", stopIds)
+      for (const c of confirmationsData || []) confirmationMap.set(c.stop_id, c)
+    }
 
-            return {
-              stop_id: stop.stop_id,
-              stop_type: stop.stop_type,
-              broker_name,
-              customer_name,
-              quantity_offloaded: stop.quantity_offloaded,
-              latitude: stop.latitude,
-              longitude: stop.longitude,
-              stop_time: stop.stop_time,
-              stop_location: stop.stop_location,
-              store_name: stop.store_name ?? null,
-              confirmed: stop.confirmed,
-              disputed: stop.disputed,
-              dispute_reason: stop.dispute_reason,
-              price_per_bag: confirmation?.price_per_bag ?? null,
-            }
-          })
-        )
+    const discByTrip = new Map<string, Discrepancy[]>()
+    const { data: allDiscRaw } = await supabase
+      .from("trip_discrepancies")
+      .select("discrepancy_id, trip_id, shortage, caked_bags, notes, reported_at")
+      .in("trip_id", tripIds)
+      .order("reported_at", { ascending: true })
+    for (const d of allDiscRaw || []) {
+      if (!discByTrip.has(d.trip_id)) discByTrip.set(d.trip_id, [])
+      discByTrip.get(d.trip_id)!.push(d)
+    }
 
-        const { data: discRaw } = await supabase
-          .from("trip_discrepancies")
-          .select("discrepancy_id, shortage, caked_bags, notes, reported_at")
-          .eq("trip_id", trip.trip_id)
-          .order("reported_at", { ascending: true })
+    const loadMoreByTrip = new Map<string, LoadMoreEntry[]>()
+    const { data: allLoadMoreRaw } = await supabase
+      .from("trip_load_more")
+      .select("id, trip_id, quantity, loading_point_type, loading_point_name, product, created_at")
+      .in("trip_id", tripIds)
+      .order("created_at", { ascending: false })
+    for (const lm of allLoadMoreRaw || []) {
+      if (!loadMoreByTrip.has(lm.trip_id)) loadMoreByTrip.set(lm.trip_id, [])
+      loadMoreByTrip.get(lm.trip_id)!.push(lm)
+    }
 
-        const discrepancies: Discrepancy[] = discRaw || []
+    const enriched = tripsData.map((trip) => {
+      const driver = driverMap.get(trip.driver_id)
+      const stopsRaw = stopsByTrip.get(trip.trip_id) || []
 
-        const { data: loadMoreRaw } = await supabase
-          .from("trip_load_more")
-          .select("id, quantity, loading_point_type, loading_point_name, product, created_at")
-          .eq("trip_id", trip.trip_id)
-          .order("created_at", { ascending: false })
+      const stops: Stop[] = stopsRaw.map((stop) => {
+        let broker_name = null
+        let customer_name = null
 
-        const load_more_entries: LoadMoreEntry[] = loadMoreRaw || []
+        if (stop.stop_type === "customer") {
+          const broker = brokerMap.get(stop.broker_id)
+          broker_name = broker?.broker_name ?? "Unknown"
 
-        const totalOffloaded = stops.reduce((sum, s) => sum + s.quantity_offloaded, 0)
-        const totalShortage = discrepancies.reduce((sum, d) => sum + (d.shortage || 0), 0)
+          if (stop.customer_id) {
+            const customer = customerMap.get(stop.customer_id)
+            customer_name = customer?.full_name ?? "Not provided"
+          } else {
+            customer_name = "Not provided"
+          }
+        }
+
+        const confirmation = confirmationMap.get(stop.stop_id)
 
         return {
-          trip_id: trip.trip_id,
-          plate_number: trip.plate_number,
-          driver_id: trip.driver_id,
-          driver_name: driver?.full_name ?? "Unknown",
-          driver_phone: driver?.phone_number ?? "—",
-          driver_status: driver?.status ?? "—",
-          product: trip.product,
-          material_centre: trip.material_centre,
-          loaded_quantity: trip.loaded_quantity,
-          remaining: trip.loaded_quantity - totalOffloaded - totalShortage,
-          stop_count: stops.length,
-          stops,
-          discrepancies,
-          load_more_entries,
-          trip_status: trip.trip_status,
-          atc: trip.ATC ?? null,
-          amount_charged: trip.amount_charged ?? null,
-          payment_mode: trip.payment_mode ?? null,
-          created_at: trip.created_at,
-          completed_at: trip.trip_status === "Completed" ? trip.updated_at ?? null : null,
+          stop_id: stop.stop_id,
+          stop_type: stop.stop_type,
+          broker_name,
+          customer_name,
+          quantity_offloaded: stop.quantity_offloaded,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          stop_time: stop.stop_time,
+          stop_location: stop.stop_location,
+          store_name: stop.store_name ?? null,
+          confirmed: stop.confirmed,
+          disputed: stop.disputed,
+          dispute_reason: stop.dispute_reason,
+          price_per_bag: confirmation?.price_per_bag ?? null,
         }
       })
-    )
+
+      const discrepancies: Discrepancy[] = discByTrip.get(trip.trip_id) || []
+      const load_more_entries: LoadMoreEntry[] = loadMoreByTrip.get(trip.trip_id) || []
+
+      const totalOffloaded = stops.reduce((sum, s) => sum + s.quantity_offloaded, 0)
+      const totalShortage = discrepancies.reduce((sum, d) => sum + (d.shortage || 0), 0)
+
+      return {
+        trip_id: trip.trip_id,
+        plate_number: trip.plate_number,
+        driver_id: trip.driver_id,
+        driver_name: driver?.full_name ?? "Unknown",
+        driver_phone: driver?.phone_number ?? "—",
+        driver_status: driver?.status ?? "—",
+        product: trip.product,
+        material_centre: trip.material_centre,
+        loaded_quantity: trip.loaded_quantity,
+        remaining: trip.loaded_quantity - totalOffloaded - totalShortage,
+        stop_count: stops.length,
+        stops,
+        discrepancies,
+        load_more_entries,
+        trip_status: trip.trip_status,
+        atc: trip.ATC ?? null,
+        amount_charged: trip.amount_charged ?? null,
+        payment_mode: trip.payment_mode ?? null,
+        created_at: trip.created_at,
+        completed_at: trip.trip_status === "Completed" ? trip.updated_at ?? null : null,
+      }
+    })
 
     return enriched
   }
@@ -268,99 +310,129 @@ export default function MonitorTrips() {
 
     if (error || !ddTripsData) return []
 
-    const ddTrips: Trip[] = await Promise.all(
-      ddTripsData.map(async (ddTrip) => {
-        const { data: stopsRaw } = await supabase
-          .from("Stops")
-          .select("stop_id, quantity_offloaded, latitude, longitude, stop_time, stop_location, broker_id, customer_id, confirmed, disputed, dispute_reason, store_name, stop_type")
-          .eq("trip_id", ddTrip.dd_trip_id)
-          .order("stop_time", { ascending: true })
+    const ddTripIds = ddTripsData.map(t => t.dd_trip_id)
 
-        const stops: Stop[] = await Promise.all(
-          (stopsRaw || []).map(async (stop) => {
-            let broker_name = null
-            let customer_name = null
+    const { data: allStopsRaw } = await supabase
+      .from("Stops")
+      .select("stop_id, trip_id, quantity_offloaded, latitude, longitude, stop_time, stop_location, broker_id, customer_id, confirmed, disputed, dispute_reason, store_name, stop_type")
+      .in("trip_id", ddTripIds)
+      .order("stop_time", { ascending: true })
 
-            if (stop.stop_type === "customer") {
-              const { data: broker } = await supabase
-                .from("Brokers")
-                .select("broker_name")
-                .eq("broker_id", stop.broker_id)
-                .single()
-              broker_name = broker?.broker_name ?? "Unknown"
+    const stopsByTrip = new Map<string, typeof allStopsRaw>()
+    for (const stop of allStopsRaw || []) {
+      if (!stopsByTrip.has(stop.trip_id)) stopsByTrip.set(stop.trip_id, [])
+      stopsByTrip.get(stop.trip_id)!.push(stop)
+    }
 
-              if (stop.customer_id) {
-                const { data: customerData } = await supabase
-                  .from("Customers")
-                  .select("full_name")
-                  .eq("customer_id", stop.customer_id)
-                  .single()
-                customer_name = customerData?.full_name ?? "Not provided"
-              } else {
-                customer_name = "Not provided"
-              }
-            }
+    const allStops = allStopsRaw || []
+    const brokerIds = [...new Set(allStops.filter(s => s.stop_type === "customer").map(s => s.broker_id).filter(Boolean))]
+    const brokerMap = new Map<string, { broker_name: string }>()
+    if (brokerIds.length > 0) {
+      const { data: brokersData } = await supabase
+        .from("Brokers")
+        .select("broker_id, broker_name")
+        .in("broker_id", brokerIds)
+      for (const b of brokersData || []) brokerMap.set(b.broker_id, b)
+    }
 
-            const { data: confirmation } = await supabase
-              .from("Stop_Confirmations")
-              .select("price_per_bag")
-              .eq("stop_id", stop.stop_id)
-              .single()
+    const customerIds = [...new Set(allStops.filter(s => s.stop_type === "customer" && s.customer_id).map(s => s.customer_id).filter(Boolean))]
+    const customerMap = new Map<string, { full_name: string }>()
+    if (customerIds.length > 0) {
+      const { data: customersData } = await supabase
+        .from("Customers")
+        .select("customer_id, full_name")
+        .in("customer_id", customerIds)
+      for (const c of customersData || []) customerMap.set(c.customer_id, c)
+    }
 
-            return {
-              stop_id: stop.stop_id,
-              stop_type: stop.stop_type,
-              broker_name,
-              customer_name,
-              quantity_offloaded: stop.quantity_offloaded,
-              latitude: stop.latitude,
-              longitude: stop.longitude,
-              stop_time: stop.stop_time,
-              stop_location: stop.stop_location,
-              store_name: stop.store_name ?? null,
-              confirmed: stop.confirmed,
-              disputed: stop.disputed,
-              dispute_reason: stop.dispute_reason,
-              price_per_bag: confirmation?.price_per_bag ?? null,
-            }
-          })
-        )
+    const stopIds = allStops.map(s => s.stop_id).filter(Boolean)
+    const confirmationMap = new Map<string, { price_per_bag: number }>()
+    if (stopIds.length > 0) {
+      const { data: confirmationsData } = await supabase
+        .from("Stop_Confirmations")
+        .select("stop_id, price_per_bag")
+        .in("stop_id", stopIds)
+      for (const c of confirmationsData || []) confirmationMap.set(c.stop_id, c)
+    }
 
-        const { data: loadMoreRaw } = await supabase
-          .from("trip_load_more")
-          .select("id, quantity, loading_point_type, loading_point_name, product, created_at")
-          .eq("trip_id", ddTrip.dd_trip_id)
-          .order("created_at", { ascending: false })
+    const loadMoreByTrip = new Map<string, LoadMoreEntry[]>()
+    const { data: allLoadMoreRaw } = await supabase
+      .from("trip_load_more")
+      .select("id, trip_id, quantity, loading_point_type, loading_point_name, product, created_at")
+      .in("trip_id", ddTripIds)
+      .order("created_at", { ascending: false })
+    for (const lm of allLoadMoreRaw || []) {
+      if (!loadMoreByTrip.has(lm.trip_id)) loadMoreByTrip.set(lm.trip_id, [])
+      loadMoreByTrip.get(lm.trip_id)!.push(lm)
+    }
 
-        const load_more_entries: LoadMoreEntry[] = loadMoreRaw || []
+    const ddTrips: Trip[] = ddTripsData.map((ddTrip) => {
+      const stopsRaw = stopsByTrip.get(ddTrip.dd_trip_id) || []
 
-        const totalOffloaded = stops.reduce((sum, s) => sum + s.quantity_offloaded, 0)
+      const stops: Stop[] = stopsRaw.map((stop) => {
+        let broker_name = null
+        let customer_name = null
+
+        if (stop.stop_type === "customer") {
+          const broker = brokerMap.get(stop.broker_id)
+          broker_name = broker?.broker_name ?? "Unknown"
+
+          if (stop.customer_id) {
+            const customer = customerMap.get(stop.customer_id)
+            customer_name = customer?.full_name ?? "Not provided"
+          } else {
+            customer_name = "Not provided"
+          }
+        }
+
+        const confirmation = confirmationMap.get(stop.stop_id)
 
         return {
-          trip_id: ddTrip.dd_trip_id,
-          plate_number: ddTrip.plate_number,
-          driver_id: "",
-          driver_name: ddTrip.driver_name ?? "DD Driver",
-          driver_phone: ddTrip.driver_phone ?? "—",
-          driver_status: "Active",
-          product: ddTrip.product,
-          material_centre: ddTrip.loading_point,
-          loaded_quantity: ddTrip.loaded_quantity,
-          remaining: ddTrip.loaded_quantity - totalOffloaded,
-          stop_count: stops.length,
-          stops,
-          discrepancies: [],
-          load_more_entries,
-          trip_status: ddTrip.trip_status,
-          atc: ddTrip.atc ?? null,
-          amount_charged: null,
-          payment_mode: null,
-          created_at: ddTrip.created_at,
-          completed_at: ddTrip.trip_status === "Completed" ? ddTrip.updated_at ?? null : null,
-          isDD: true,
+          stop_id: stop.stop_id,
+          stop_type: stop.stop_type,
+          broker_name,
+          customer_name,
+          quantity_offloaded: stop.quantity_offloaded,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          stop_time: stop.stop_time,
+          stop_location: stop.stop_location,
+          store_name: stop.store_name ?? null,
+          confirmed: stop.confirmed,
+          disputed: stop.disputed,
+          dispute_reason: stop.dispute_reason,
+          price_per_bag: confirmation?.price_per_bag ?? null,
         }
       })
-    )
+
+      const load_more_entries: LoadMoreEntry[] = loadMoreByTrip.get(ddTrip.dd_trip_id) || []
+
+      const totalOffloaded = stops.reduce((sum, s) => sum + s.quantity_offloaded, 0)
+
+      return {
+        trip_id: ddTrip.dd_trip_id,
+        plate_number: ddTrip.plate_number,
+        driver_id: "",
+        driver_name: ddTrip.driver_name ?? "DD Driver",
+        driver_phone: ddTrip.driver_phone ?? "—",
+        driver_status: "Active",
+        product: ddTrip.product,
+        material_centre: ddTrip.loading_point,
+        loaded_quantity: ddTrip.loaded_quantity,
+        remaining: ddTrip.loaded_quantity - totalOffloaded,
+        stop_count: stops.length,
+        stops,
+        discrepancies: [],
+        load_more_entries,
+        trip_status: ddTrip.trip_status,
+        atc: ddTrip.atc ?? null,
+        amount_charged: null,
+        payment_mode: null,
+        created_at: ddTrip.created_at,
+        completed_at: ddTrip.trip_status === "Completed" ? ddTrip.updated_at ?? null : null,
+        isDD: true,
+      }
+    })
 
     return ddTrips
   }
@@ -370,10 +442,9 @@ export default function MonitorTrips() {
       fetchTrips().catch(() => []),
       fetchDdTrips().catch(() => [])
     ])
-    const allTrips = [...normal, ...dd]
-    if (allTrips.length > 0) {
-      setTrips(allTrips)
-    }
+    const ddTripIds = new Set(dd.map(t => t.trip_id))
+    const allTrips = [...normal.filter(t => !ddTripIds.has(t.trip_id)), ...dd]
+    setTrips(allTrips)
     setLastUpdated(new Date())
     setLoading(false)
   }
@@ -399,8 +470,10 @@ export default function MonitorTrips() {
     if (!endingTrip || !selectedTrip) return
     setEndTripLoading(true)
 
-    await supabase.from("Trips").update({ trip_status: "Completed" }).eq("trip_id", endingTrip)
-    await supabase.from("Trucks").update({ status: "Empty" }).eq("plate_number", selectedTrip.plate_number)
+    const r1 = await apiMutate("trips", { action: "update", table: "Trips", data: { trip_status: "Completed" }, filters: { trip_id: endingTrip } })
+    const r2 = await apiMutate("trips", { action: "update", table: "Trucks", data: { status: "Empty" }, filters: { plate_number: selectedTrip.plate_number } })
+    if (r1.error) console.error("EndTrip update Trips failed:", r1.error)
+    if (r2.error) console.error("EndTrip update Trucks failed:", r2.error)
 
     setEndTripLoading(false)
     setEndingTrip(null)
@@ -408,6 +481,8 @@ export default function MonitorTrips() {
     setSelectedTrip(null)
     loadAll()
   }
+
+  const disputedTripCount = trips.filter((t) => t.stops.some((s) => s.disputed)).length
 
   const filteredTrips = filterStatus === "All"
     ? trips
@@ -544,6 +619,14 @@ export default function MonitorTrips() {
               onMouseLeave={e => { if (!isActive) { e.currentTarget.style.background = "white"; e.currentTarget.style.borderColor = "#e2e8f0" } }}
             >
               {option}
+              {option === "Disputed" && !isActive && disputedTripCount > 0 && (
+                <span style={{ display: "inline-flex", marginLeft: 6, width: 8, height: 8, borderRadius: "50%", background: "#ef4444" }} />
+              )}
+              {option === "Disputed" && isActive && disputedTripCount > 0 && (
+                <span style={{ display: "inline-flex", marginLeft: 6, background: "#fef2f2", color: "#ef4444", borderRadius: 10, padding: "0 6px", fontSize: 11, fontWeight: 700, lineHeight: "18px", minWidth: 18, justifyContent: "center" }}>
+                  {disputedTripCount}
+                </span>
+              )}
             </button>
           )
         })}
@@ -855,7 +938,7 @@ export default function MonitorTrips() {
 
                 <div style={{ display: "grid", gridTemplateColumns: selectedTrip && (selectedTrip.trip_status === "In transit" || selectedTrip.trip_status === "On hold") ? "1fr 1fr" : "1fr", gap: 10 }}>
                   {selectedTrip && (selectedTrip.trip_status === "In transit" || selectedTrip.trip_status === "On hold") && (
-                    <button onClick={handleEndTripClick} style={{ padding: "12px 16px", background: "#fef2f2", color: "#ef4444", border: "1px solid #fecaca", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44, transition: "background 0.2s" }} onMouseEnter={e => e.currentTarget.style.background = "#fee2e2"} onMouseLeave={e => e.currentTarget.style.background = "#fef2f2"}>
+                    <button onClick={handleEndTripClick} disabled={!canEdit} style={{ padding: "12px 16px", background: !canEdit ? "#94a3b8" : "#fef2f2", color: !canEdit ? "white" : "#ef4444", border: "1px solid", borderColor: !canEdit ? "#94a3b8" : "#fecaca", borderRadius: 8, cursor: !canEdit ? "not-allowed" : "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44, transition: "background 0.2s" }} onMouseEnter={e => { if (canEdit) e.currentTarget.style.background = "#fee2e2" }} onMouseLeave={e => { if (canEdit) e.currentTarget.style.background = "#fef2f2" }}>
                       End Trip
                     </button>
                   )}
@@ -881,7 +964,7 @@ export default function MonitorTrips() {
               <button onClick={() => setEndingTrip(null)} disabled={endTripLoading} style={{ padding: "12px 16px", background: "white", color: "#475569", border: "1px solid #cbd5e1", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44, transition: "background 0.2s" }} onMouseEnter={e => e.currentTarget.style.background = "#f8fafc"} onMouseLeave={e => e.currentTarget.style.background = "white"}>
                 Cancel
               </button>
-              <button onClick={confirmEndTrip} disabled={endTripLoading} style={{ padding: "12px 16px", background: "#ef4444", color: "white", border: "none", borderRadius: 8, cursor: endTripLoading ? "not-allowed" : "pointer", fontWeight: 600, fontSize: fontSize.md, opacity: endTripLoading ? 0.7 : 1, minHeight: 44, transition: "background 0.2s" }} onMouseEnter={e => !endTripLoading && (e.currentTarget.style.background = "#dc2626")} onMouseLeave={e => !endTripLoading && (e.currentTarget.style.background = "#ef4444")}>
+              <button onClick={confirmEndTrip} disabled={endTripLoading || !canEdit} style={{ padding: "12px 16px", background: endTripLoading || !canEdit ? "#94a3b8" : "#ef4444", color: "white", border: "none", borderRadius: 8, cursor: endTripLoading || !canEdit ? "not-allowed" : "pointer", fontWeight: 600, fontSize: fontSize.md, opacity: endTripLoading || !canEdit ? 0.7 : 1, minHeight: 44, transition: "background 0.2s" }} onMouseEnter={e => !endTripLoading && canEdit && (e.currentTarget.style.background = "#dc2626")} onMouseLeave={e => !endTripLoading && canEdit && (e.currentTarget.style.background = "#ef4444")}>
                 {endTripLoading ? "Ending..." : "Yes, End Trip"}
               </button>
             </div>
