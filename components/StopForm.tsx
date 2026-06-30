@@ -6,12 +6,12 @@ import BrokerDropdown from "./BrokerDropdown"
 import CustomerSelector from "./CustomerSelector"
 import { useOfflineTripAction } from "@/app/hooks/useOfflineTripAction"
 
-type Broker = { broker_id: string; broker_name: string }
+type Broker = { broker_id: string; broker_name: string; phone_number?: string | null }
 type Customer = { customer_id: string; full_name: string; phone_number: string }
 type Props = { tripId: string; loadedQuantity?: number; offloadedSoFar?: number; onStopLogged: (quantityOffloaded: number) => void }
 
 const STORE_LOCATIONS = [
-  "Calabar Mini Depot", "Ikom Mini Depot", "Ogoja Warehouse", "Uyo Depot",
+  "Calabar Mini Depot", "Ikom Mini Depot", "Ogoja Depot", "Uyo Depot",
   "Brooks Outlet", "Urua Ekpa Outlet", "Urua Nyemeiko Outlet", "Reserve Store", "E1 Outlet", "Ogoja Outlet",
 ]
 
@@ -250,7 +250,7 @@ export default function StopForm({ tripId, loadedQuantity: initialLoaded = 0, of
       <div style={{ marginBottom: 24 }}>
         <label style={{ fontWeight: "bold", fontSize: 15, color: "#171717" }}>GPS Coordinates <span style={{ fontWeight: "normal", color: "#aaa", fontSize: 13 }}>(optional)</span></label>
         <div style={{ marginTop: 6 }}>
-          <button onClick={captureGPS} style={{ padding: "12px 16px", cursor: "pointer", marginBottom: 8, borderRadius: 8, border: "1.5px solid #ddd", background: "white", color: "#171717", fontSize: 14, minHeight: 48 }}>
+          <button onClick={captureGPS} style={{ padding: "12px 16px", cursor: "pointer", marginBottom: 8, borderRadius: 8, border: "1.5px solid #0070f3", background: "white", color: "#0070f3", fontSize: 14, minHeight: 48 }}>
             📍 Capture My Location
           </button>
           <p style={{ fontSize: 13, color: "#555", margin: 0 }}>{gpsStatus}</p>

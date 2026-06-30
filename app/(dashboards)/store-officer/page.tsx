@@ -1,13 +1,15 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import { useRouter } from "next/navigation"
 import { supabase } from "@/lib/supabase"
 import { formatAmount, parseAmount } from "@/lib/formatAmount"
+import { Icon } from "@iconify/react"
 import CustomerSelector from "@/components/CustomerSelector"
+import ReportModal from "@/components/ReportModal"
 import ModernInput from "@/components/ModernInput"
 
-type Officer = { officer_id: string; full_name: string; store_name: string }
+type Officer = { officer_id: string; full_name: string; store_name: string; profile_picture_url?: string }
 
 type PendingStop = {
   stop_id: string
@@ -27,21 +29,75 @@ type Sale = {
   sale_id: string
   product: string
   quantity: number
-  price_per_bag: number
-  total_amount: number
+  price_per_bag: number | null
+  total_amount: number | null
   customer_name: string | null
   payment_mode: string
-  sale_type: string
+  delivery_mode: string
   tricycle_number: string | null
+  truck_plate: string | null
   sold_at: string
+  created_at: string
+  broker_id: string | null
+  broker_name?: string | null
+  status: string
 }
 
-type SupplyLine = { product: string; quantity: string }
+type GroupedSale = {
+  group_id: string
+  customer_name: string | null
+  payment_mode: string
+  delivery_mode: string
+  tricycle_number: string | null
+  truck_plate: string | null
+  sold_at: string
+  broker_id: string | null
+  broker_name?: string | null
+  status: string
+  lines: Sale[]
+}
 
-const PAYMENT_MODES = ["Cash", "Transfer", "POS", "Credit"]
+type Broker = { broker_id: string; broker_name: string }
+
+type SupplyLine = { product: string; quantity: string }
+type SaleLine = { product: string; quantity: string; price_per_bag: string }
+
+const PAYMENT_MODES = ["Cash", "Transfer", "POS", "Broker"]
+
+function useBreakpoint() {
+  const [isDesktop, setIsDesktop] = useState(false)
+  const [isMobile, setIsMobile] = useState(true)
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 640)
+      setIsDesktop(window.innerWidth >= 640)
+    }
+
+    handleResize()
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [])
+
+  return { isMobile, isDesktop }
+}
+
+const fontSize = {
+  xs: 12,
+  sm: 13,
+  base: 14,
+  md: 15,
+  lg: 16,
+  xl: 20,
+  "2xl": 24,
+  "3xl": 28
+}
 
 export default function StoreOfficerDashboard() {
+  const { isMobile } = useBreakpoint()
   const router = useRouter()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  
   const [officer, setOfficer] = useState<Officer | null>(null)
   const [pendingStops, setPendingStops] = useState<PendingStop[]>([])
   const [stock, setStock] = useState<StockBalance[]>([])
@@ -50,30 +106,51 @@ export default function StoreOfficerDashboard() {
   const [tab, setTab] = useState<"supply" | "sales" | "stock">("supply")
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  // Supply confirmation modal
   const [confirmingStop, setConfirmingStop] = useState<PendingStop | null>(null)
   const [supplyLines, setSupplyLines] = useState<SupplyLine[]>([{ product: "", quantity: "" }])
   const [confirmError, setConfirmError] = useState("")
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [allProducts, setAllProducts] = useState<string[]>([])
 
-  // Log sale modal
   const [showSaleModal, setShowSaleModal] = useState(false)
-  const [saleProduct, setSaleProduct] = useState("")
-  const [saleQty, setSaleQty] = useState("")
-  const [salePrice, setSalePrice] = useState("")
+  const [saleLines, setSaleLines] = useState<SaleLine[]>([{ product: "", quantity: "", price_per_bag: "" }])
   const [saleCustomer, setSaleCustomer] = useState<{ full_name: string } | null>(null)
   const [salePayment, setSalePayment] = useState("")
   const [saleError, setSaleError] = useState("")
   const [saleLoading, setSaleLoading] = useState(false)
-  const [saleType, setSaleType] = useState<"direct" | "tricycle">("direct")
+  const [deliveryMode, setDeliveryMode] = useState<"self" | "tricycle" | "truck">("self")
   const [tricycles, setTricycles] = useState<{ tricycle_id: string; tricycle_number: string }[]>([])
   const [saleTricycleId, setSaleTricycleId] = useState("")
   const [tricycleSearch, setTricycleSearch] = useState("")
   const [tricycleDropOpen, setTricycleDropOpen] = useState(false)
+  const [trucks, setTrucks] = useState<{ plate_number: string; kbnl_truck_no: string | null; truck_model: string | null }[]>([])
+  const [saleTruckPlate, setSaleTruckPlate] = useState("")
+  const [truckSearch, setTruckSearch] = useState("")
+  const [truckDropOpen, setTruckDropOpen] = useState(false)
+  const [brokers, setBrokers] = useState<Broker[]>([])
+  const [saleBroker, setSaleBroker] = useState<Broker | null>(null)
+  const [brokerSearch, setBrokerSearch] = useState("")
+  const [brokerDropOpen, setBrokerDropOpen] = useState(false)
+  const [isBrokerLinked, setIsBrokerLinked] = useState(false)
+  const [saleDate, setSaleDate] = useState(new Date().toISOString().split("T")[0])
 
-  // Sales filter
+  function saleDateWithTime(dateStr: string) {
+    const now = new Date()
+    const [y, m, d] = dateStr.split("-").map(Number)
+    return new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds()).toISOString()
+  }
+
   const [salesFilter, setSalesFilter] = useState("All")
+  const [salesDateFilter, setSalesDateFilter] = useState("")
+  const [salesSortByAdded, setSalesSortByAdded] = useState(true)
+
+  // Profile picture upload states
+  const [showPictureModal, setShowPictureModal] = useState(false)
+  const [showReportModal, setShowReportModal] = useState(false)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [picturePreview, setPicturePreview] = useState<string | null>(null)
+  const [pictureLoading, setPictureLoading] = useState(false)
+  const [pictureError, setPictureError] = useState("")
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
@@ -94,7 +171,7 @@ export default function StoreOfficerDashboard() {
 
     const { data: officerData } = await supabase
       .from("store_officers")
-      .select("officer_id, full_name, store_name")
+      .select("officer_id, full_name, store_name, profile_picture_url")
       .eq("officer_id", session.user.id)
       .single()
     if (!officerData) { router.push("/login"); return }
@@ -109,6 +186,8 @@ export default function StoreOfficerDashboard() {
       fetchStock(officerData.store_name),
       fetchSales(officerData.officer_id),
       fetchTricycles(),
+      fetchTrucks(),
+      fetchBrokers(),
     ])
     setLoading(false)
   }
@@ -167,20 +246,28 @@ export default function StoreOfficerDashboard() {
   async function fetchSales(officerId: string) {
     const { data } = await supabase
       .from("store_sales")
-      .select("sale_id, product, quantity, price_per_bag, total_amount, customer_name, payment_mode, sale_type, tricycle_id, sold_at")
+      .select("sale_id, product, quantity, price_per_bag, total_amount, customer_name, payment_mode, delivery_mode, tricycle_id, truck_plate, sold_at, created_at, broker_id, status")
       .eq("officer_id", officerId)
-      .order("sold_at", { ascending: false })
 
     if (!data) return
 
     const enriched = await Promise.all(data.map(async s => {
       let tricycle_number: string | null = null
+      let broker_name: string | null = null
+
       if (s.tricycle_id) {
         const { data: t } = await supabase
           .from("tricycles").select("tricycle_number").eq("tricycle_id", s.tricycle_id).single()
         tricycle_number = t?.tricycle_number ?? null
       }
-      return { ...s, tricycle_number }
+
+      if (s.broker_id) {
+        const { data: b } = await supabase
+          .from("Brokers").select("broker_name").eq("broker_id", s.broker_id).single()
+        broker_name = b?.broker_name ?? null
+      }
+
+      return { ...s, tricycle_number, broker_name }
     }))
 
     setSales(enriched)
@@ -194,7 +281,22 @@ export default function StoreOfficerDashboard() {
     setTricycles(data || [])
   }
 
-  // Supply line helpers
+  async function fetchTrucks() {
+    const { data } = await supabase
+      .from("Trucks")
+      .select("plate_number, kbnl_truck_no, truck_model")
+      .order("plate_number", { ascending: true })
+    setTrucks(data || [])
+  }
+
+  async function fetchBrokers() {
+    const { data } = await supabase
+      .from("Brokers")
+      .select("broker_id, broker_name")
+      .order("broker_name", { ascending: true })
+    setBrokers(data || [])
+  }
+
   function addSupplyLine() {
     setSupplyLines([...supplyLines, { product: "", quantity: "" }])
   }
@@ -212,19 +314,16 @@ export default function StoreOfficerDashboard() {
   async function handleConfirmSupply() {
     if (!confirmingStop || !officer) return
 
-    // Validate lines
     const totalInLines = supplyLines.reduce((sum, l) => sum + (parseInt(l.quantity) || 0), 0)
     if (supplyLines.some(l => !l.product)) return setConfirmError("Select a product for each line")
     if (supplyLines.some(l => !l.quantity || parseInt(l.quantity) <= 0)) return setConfirmError("Enter a valid quantity for each line")
-    if (totalInLines !== confirmingStop.quantity_offloaded) return setConfirmError(`Total quantity in lines (${totalInLines}) must equal bags delivered (${confirmingStop.quantity_offloaded})`)
+    if (totalInLines !== confirmingStop.quantity_offloaded) return setConfirmError(`Total (${totalInLines}) must equal ${confirmingStop.quantity_offloaded}`)
 
-    // Check for duplicate products
     const products = supplyLines.map(l => l.product)
-    if (new Set(products).size !== products.length) return setConfirmError("Duplicate products — merge them into one line")
+    if (new Set(products).size !== products.length) return setConfirmError("Duplicate products — merge them")
 
     setConfirmLoading(true)
 
-    // Insert supply confirmation
     const { data: confirmation, error: confError } = await supabase
       .from("store_supply_confirmations")
       .insert([{
@@ -237,7 +336,6 @@ export default function StoreOfficerDashboard() {
 
     if (confError || !confirmation) { setConfirmError("Failed to confirm supply"); setConfirmLoading(false); return }
 
-    // Insert supply lines
     const { error: linesError } = await supabase
       .from("store_supply_lines")
       .insert(supplyLines.map(l => ({
@@ -248,10 +346,8 @@ export default function StoreOfficerDashboard() {
 
     if (linesError) { setConfirmError("Supply confirmed but product lines failed"); setConfirmLoading(false); return }
 
-    // Mark stop as confirmed
     await supabase.from("Stops").update({ confirmed: true }).eq("stop_id", confirmingStop.stop_id)
 
-    // Update stock balances per product (upsert)
     for (const line of supplyLines) {
       const qty = parseInt(line.quantity)
       const { data: existing } = await supabase
@@ -284,94 +380,388 @@ export default function StoreOfficerDashboard() {
     ])
   }
 
+  function addSaleLine() {
+    setSaleLines([...saleLines, { product: "", quantity: "", price_per_bag: "" }])
+  }
+  
+  function removeSaleLine(index: number) {
+    if (saleLines.length === 1) return
+    setSaleLines(saleLines.filter((_, i) => i !== index))
+  }
+  
+  function updateSaleLine(index: number, field: "product" | "quantity" | "price_per_bag", value: string) {
+    setSaleLines(saleLines.map((l, i) => i === index ? { ...l, [field]: value } : l))
+    setSaleError("")
+  }
+  
   async function handleLogSale() {
     if (!officer) return
-    if (!saleProduct) return setSaleError("Select a product")
-    const qty = parseInt(saleQty)
-    if (!saleQty || qty <= 0) return setSaleError("Enter a valid quantity")
-    const price = parseAmount(salePrice)
-    if (!salePrice || price <= 0) return setSaleError("Enter a valid price per bag")
+  
+    // Validate lines
+    if (saleLines.some(l => !l.product)) return setSaleError("Select a product for each line")
+    if (saleLines.some(l => !l.quantity || parseInt(l.quantity) <= 0)) return setSaleError("Enter a valid quantity for each line")
+    
     if (!salePayment) return setSaleError("Select a payment mode")
-    if (saleType === "tricycle" && !saleTricycleId) return setSaleError("Select a tricycle")
-    if (!saleCustomer || !saleCustomer.full_name.trim()) return setSaleError("Customer name is required")
+    if (deliveryMode === "tricycle" && !saleTricycleId) return setSaleError("Select a tricycle")
+    if (deliveryMode === "truck" && !saleTruckPlate) return setSaleError("Select a truck")
+    if (!saleDate) return setSaleError("Select a sale date")
 
-    // Check stock
-    const stockItem = stock.find(s => s.product === saleProduct)
-    if (!stockItem || stockItem.balance < qty) return setSaleError(`Insufficient stock — only ${stockItem?.balance ?? 0} bags of ${saleProduct} available`)
-
+    // Broker-linked validation
+    if (isBrokerLinked) {
+      if (!saleBroker) return setSaleError("Select a broker")
+    }
+    // Self / Truck / non-broker tricycle: all lines must have price
+    if (!isBrokerLinked) {
+      if (saleLines.some(l => !l.price_per_bag)) return setSaleError("Enter a price per bag for each line")
+      if (saleLines.some(l => parseAmount(l.price_per_bag) <= 0)) return setSaleError("Enter valid prices")
+    }
+  
+    // Check stock for all products
+    const insufficientStock = saleLines.find(line => {
+      const stockItem = stock.find(s => s.product === line.product)
+      const qty = parseInt(line.quantity)
+      return !stockItem || stockItem.balance < qty
+    })
+  
+    if (insufficientStock) {
+      const stockItem = stock.find(s => s.product === insufficientStock.product)
+      return setSaleError(`Insufficient ${insufficientStock.product} — only ${stockItem?.balance ?? 0} bags available`)
+    }
+  
     setSaleLoading(true)
+  
+    try {
+      // Insert one row per product line
+      const salesToInsert = saleLines.map(line => ({
+        officer_id: officer.officer_id,
+        store_name: officer.store_name,
+        product: line.product,
+        quantity: parseInt(line.quantity),
+        price_per_bag: isBrokerLinked ? null : parseAmount(line.price_per_bag),
+        customer_name: saleCustomer?.full_name.trim() || null,
+        payment_mode: salePayment,
+        delivery_mode: deliveryMode,
+        tricycle_id: deliveryMode === "tricycle" ? saleTricycleId : null,
+        truck_plate: deliveryMode === "truck" ? saleTruckPlate : null,
+        broker_id: isBrokerLinked ? saleBroker?.broker_id : null,
+        status: isBrokerLinked ? "Pending" : "Confirmed",
+        sold_at: saleDateWithTime(saleDate),
+      }))
+  
+      const { error: saleErr } = await supabase.from("store_sales").insert(salesToInsert)
+      if (saleErr) {
+        setSaleError("Failed to log sales")
+        setSaleLoading(false)
+        return
+      }
+  
+      // Deduct stock for each product
+      for (const line of saleLines) {
+        const stockItem = stock.find(s => s.product === line.product)
+        if (!stockItem) continue
+  
+        const qty = parseInt(line.quantity)
+        await supabase
+          .from("store_stock")
+          .update({ balance: stockItem.balance - qty, updated_at: new Date().toISOString() })
+          .eq("store_name", officer.store_name)
+          .eq("product", line.product)
+      }
+  
+      setSaleLoading(false)
+      setShowSaleModal(false)
+      setSaleLines([{ product: "", quantity: "", price_per_bag: "" }])
+      setSaleCustomer(null)
+      setSalePayment("")
+      setSaleError("")
+      setDeliveryMode("self")
+      setSaleTricycleId("")
+      setTricycleSearch("")
+      setSaleTruckPlate("")
+      setTruckSearch("")
+      setIsBrokerLinked(false)
+      setSaleBroker(null)
+      setBrokerSearch("")
+      setSaleDate(new Date().toISOString().split("T")[0])
 
-    const { error: saleErr } = await supabase.from("store_sales").insert([{
-      officer_id: officer.officer_id,
-      store_name: officer.store_name,
-      product: saleProduct,
-      quantity: qty,
-      price_per_bag: price,
-      customer_name: saleCustomer.full_name.trim(),
-      payment_mode: salePayment,
-      sale_type: saleType,
-      tricycle_id: saleType === "tricycle" ? saleTricycleId : null,
-    }])
-
-    if (saleErr) { setSaleError("Failed to log sale"); setSaleLoading(false); return }
-
-    // Deduct from stock
-    await supabase
-      .from("store_stock")
-      .update({ balance: stockItem.balance - qty, updated_at: new Date().toISOString() })
-      .eq("store_name", officer.store_name)
-      .eq("product", saleProduct)
-
-    setSaleLoading(false)
-    setShowSaleModal(false)
-    setSaleProduct(""); setSaleQty(""); setSalePrice(""); setSaleCustomer(null); setSalePayment(""); setSaleError(""); setSaleType("direct"); setSaleTricycleId(""); setTricycleSearch("")
-    await Promise.all([fetchSales(officer.officer_id), fetchStock(officer.store_name)])
+      await Promise.all([fetchSales(officer.officer_id), fetchStock(officer.store_name)])
+    } catch (err) {
+      setSaleError("An error occurred")
+      setSaleLoading(false)
+    }
   }
 
-  const filteredSales = salesFilter === "All"
-    ? sales
-    : sales.filter(s => s.product === salesFilter)
+  function handleAvatarClick() {
+    setPictureError("")
+    setPicturePreview(null)
+    setSelectedFile(null)
+    setShowPictureModal(true)
+  }
 
-  const uniqueProducts = [...new Set(sales.map(s => s.product))]
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+
+    if (!file.type.startsWith("image/")) {
+      setPictureError("Please select an image file")
+      return
+    }
+
+    if (file.size > 1 * 1024 * 1024) {
+      setPictureError("Image must be less than 1MB")
+      return
+    }
+
+    setSelectedFile(file)
+    setPictureError("")
+
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      setPicturePreview(event.target?.result as string)
+    }
+    reader.readAsDataURL(file)
+  }
+
+  async function handleUploadPicture() {
+    if (!selectedFile || !officer) {
+      setPictureError("Please select an image")
+      return
+    }
+
+    setPictureLoading(true)
+    setPictureError("")
+
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session) { setPictureError("Session expired"); setPictureLoading(false); return }
+
+      const fileExt = selectedFile.name.split(".").pop()
+      const fileName = `${officer.officer_id}-${Date.now()}.${fileExt}`
+      const filePath = `${officer.officer_id}/${fileName}`
+
+      if (officer.profile_picture_url) {
+        const oldPath = officer.profile_picture_url.split("/").slice(-2).join("/")
+        await supabase.storage.from("profile-pictures").remove([oldPath])
+      }
+
+      const { error: uploadError } = await supabase.storage
+        .from("profile-pictures")
+        .upload(filePath, selectedFile, { upsert: false })
+
+      if (uploadError) { setPictureError("Upload failed"); setPictureLoading(false); return }
+
+      const { data: { publicUrl } } = supabase.storage
+        .from("profile-pictures")
+        .getPublicUrl(filePath)
+
+      const { error: updateError } = await supabase
+        .from("store_officers")
+        .update({ profile_picture_url: publicUrl })
+        .eq("officer_id", officer.officer_id)
+
+      if (updateError) { setPictureError("Failed to save profile"); setPictureLoading(false); return }
+
+      setOfficer({ ...officer, profile_picture_url: publicUrl })
+
+      setPictureLoading(false)
+      setShowPictureModal(false)
+      setSelectedFile(null)
+      setPicturePreview(null)
+    } catch (err) {
+      setPictureError("Something went wrong")
+      setPictureLoading(false)
+    }
+  }
+
+  const groupedSales = sales.reduce<GroupedSale[]>((groups, sale) => {
+    const groupId = [
+      sale.sold_at,
+      sale.customer_name ?? "",
+      sale.payment_mode,
+      sale.delivery_mode,
+      sale.tricycle_number ?? "",
+      sale.truck_plate ?? "",
+      sale.broker_id ?? "",
+      sale.status,
+    ].join("|")
+    const existing = groups.find(group => group.group_id === groupId)
+
+    if (existing) {
+      existing.lines.push(sale)
+      return groups
+    }
+
+    groups.push({
+      group_id: groupId,
+      customer_name: sale.customer_name,
+      payment_mode: sale.payment_mode,
+      delivery_mode: sale.delivery_mode,
+      tricycle_number: sale.tricycle_number,
+      truck_plate: sale.truck_plate,
+      sold_at: sale.sold_at,
+      broker_id: sale.broker_id,
+      broker_name: sale.broker_name,
+      status: sale.status,
+      lines: [sale],
+    })
+    return groups
+  }, [])
+
+  const salesSortOptions = [
+    { label: "Most recent added", value: true },
+    { label: "By sale date", value: false },
+  ] as const
+
+  const filteredSales = groupedSales.filter(s => {
+    if (salesFilter !== "All" && s.payment_mode !== salesFilter) return false
+    if (salesDateFilter) {
+      const saleDate = s.sold_at.split("T")[0]
+      if (saleDate !== salesDateFilter) return false
+    }
+    return true
+  })
+  .sort((a, b) => {
+    if (salesSortByAdded) {
+      const aCreated = a.lines[0]?.created_at || a.sold_at
+      const bCreated = b.lines[0]?.created_at || b.sold_at
+      return bCreated.localeCompare(aCreated)
+    } else {
+      return b.sold_at.localeCompare(a.sold_at)
+    }
+  })
+  const paymentFilters = PAYMENT_MODES.filter(mode => sales.some(sale => sale.payment_mode === mode))
+
+  const getStatusColor = (status: string) => {
+    switch(status) {
+      case "Pending": return "#f5a623"
+      case "Confirmed": return "#10b981"
+      case "Rejected": return "#ef4444"
+      default: return "#64748b"
+    }
+  }
 
   if (loading) return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "Arial" }}>
-      <p style={{ color: "#888" }}>Loading...</p>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", fontFamily: "'Inter', sans-serif" }}>
+      <div style={{ width: 40, height: 40, borderRadius: "50%", border: "3px solid #e2e8f0", borderTopColor: "#0070f3", animation: "spin 1s linear infinite" }} />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f9f9f9", fontFamily: "Arial" }}>
+    <div style={{ minHeight: "100vh", background: "#f8fafc", fontFamily: "'Inter', sans-serif" }}>
 
-      {/* Header */}
-      <div style={{ background: "white", borderBottom: "1px solid #eee", padding: "16px 24px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18 }}>Store Officer</h2>
-          <p style={{ margin: 0, fontSize: 13, color: "#888" }}>{officer?.full_name} · {officer?.store_name}</p>
+      {/* Profile Banner */}
+      <div style={{ background: "white", borderBottom: "1px solid #e2e8f0", padding: isMobile ? "16px" : "24px 32px" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", gap: isMobile ? 12 : 16, justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 12 : 16, flex: 1 }}>
+            <div
+              onClick={handleAvatarClick}
+              style={{
+                width: isMobile ? 48 : 56,
+                height: isMobile ? 48 : 56,
+                borderRadius: "50%",
+                background: officer?.profile_picture_url ? "transparent" : "#f0f7ff",
+                border: "2px solid #bfdbfe",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                cursor: "pointer",
+                position: "relative",
+                overflow: "hidden",
+                transition: "all 0.2s",
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.borderColor = "#0070f3"
+                e.currentTarget.style.transform = "scale(1.05)"
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.borderColor = "#bfdbfe"
+                e.currentTarget.style.transform = "scale(1)"
+              }}
+            >
+              {officer?.profile_picture_url ? (
+                <img
+                  src={officer.profile_picture_url}
+                  alt={officer.full_name}
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                  }}
+                />
+              ) : (
+                <span style={{ fontSize: isMobile ? 20 : 24, fontWeight: 700, color: "#0070f3" }}>
+                  {officer?.full_name.charAt(0).toUpperCase()}
+                </span>
+              )}
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  background: "rgba(0, 0, 0, 0.4)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  opacity: 0,
+                  transition: "opacity 0.2s",
+                }}
+                onMouseEnter={e => e.currentTarget.style.opacity = "1"}
+                onMouseLeave={e => e.currentTarget.style.opacity = "0"}
+              >
+                <Icon icon="mdi:camera" width={20} height={20} color="white" />
+              </div>
+            </div>
+            <div>
+              <h1 style={{ margin: 0, fontSize: isMobile ? fontSize.lg : fontSize.xl, fontWeight: 700, color: "#0070f3" }}>
+                {officer?.full_name}
+              </h1>
+              <p style={{ margin: "2px 0 0", fontSize: fontSize.sm, color: "#64748b" }}>
+                {officer?.store_name}
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              onClick={() => setShowReportModal(true)}
+              style={{ padding: "8px 14px", background: "#fff8e1", color: "#f5a623", border: "1.5px solid #f8ad5c", borderRadius: 8, cursor: "pointer", fontSize: fontSize.sm, minHeight: 40, fontWeight: 600, display: "flex", alignItems: "center", gap: 6, transition: "all 0.2s", whiteSpace: "nowrap" }}
+              onMouseEnter={e => { e.currentTarget.style.background = "#fff0e1"; e.currentTarget.style.borderColor = "#f8ad5c" }}
+              onMouseLeave={e => { e.currentTarget.style.background = "#fff8e1"; e.currentTarget.style.borderColor = "#f8ad5c" }}
+            >
+              <Icon icon="mdi:alert-circle-outline" width={16} />
+              {!isMobile && "Report"}
+            </button>
+            <button
+              onClick={async () => { await supabase.auth.signOut(); router.push("/login") }}
+              style={{ padding: "8px 16px", background: "rgba(239, 68, 68, 0.05)", color: "#ef4444", border: "1.5px solid #fecaca", borderRadius: 6, cursor: "pointer", fontSize: fontSize.sm, fontWeight: 600, transition: "all 0.2s", minHeight: 40, whiteSpace: "nowrap" }}
+              onMouseEnter={e => { e.currentTarget.style.background = "rgba(239, 68, 68, 0.1)"; e.currentTarget.style.borderColor = "#fca5a5" }}
+              onMouseLeave={e => { e.currentTarget.style.background = "rgba(239, 68, 68, 0.05)"; e.currentTarget.style.borderColor = "#fecaca" }}
+            >
+              Logout
+            </button>
+          </div>
         </div>
-        <button
-          onClick={async () => { await supabase.auth.signOut(); router.push("/login") }}
-          style={{ padding: "8px 20px", background: "rgba(255, 68, 68,0.05)", color: "#ff4444", border: "1px solid #ff4444", borderRadius: 6, cursor: "pointer", fontSize: 14 }}
-        >
-          Logout
-        </button>
       </div>
 
-      <div style={{ padding: 24, maxWidth: 800, margin: "0 auto" }}>
+      <div style={{ padding: isMobile ? "16px" : "32px", maxWidth: 1200, margin: "0 auto" }}>
 
         {/* Stock Summary */}
-        <div style={{ background: "white", border: "1px solid #eee", borderRadius: 12, padding: 20, marginBottom: 24, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
-          <p style={{ margin: "0 0 12px", fontWeight: "bold", fontSize: 15 }}>Stock Balance</p>
+        <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: isMobile ? 16 : 24, marginBottom: 24, boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>Stock Balance</p>
+            <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>
+              Total: <span style={{ color: "#0070f3" }}>{stock.reduce((sum, s) => sum + s.balance, 0).toLocaleString()}</span> <span style={{ fontSize: fontSize.sm, fontWeight: 500, color: "#64748b" }}>bags</span>
+            </p>
+          </div>
           {stock.length === 0
-            ? <p style={{ color: "#888", fontSize: 13, margin: 0 }}>No stock recorded yet.</p>
+            ? <p style={{ color: "#64748b", fontSize: fontSize.base, margin: 0 }}>No stock recorded yet.</p>
             : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+              <div style={{ display: "grid", gridTemplateColumns: isMobile ? "repeat(2, 1fr)" : "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
                 {stock.map(s => (
-                  <div key={s.product} style={{ background: "#f0f7ff", border: "1px solid #0070f322", borderRadius: 8, padding: "12px 16px" }}>
-                    <p style={{ margin: 0, fontSize: 12, color: "#888" }}>{s.product}</p>
-                    <p style={{ margin: "4px 0 0", fontWeight: "bold", fontSize: 22, color: s.balance === 0 ? "#ff4444" : s.balance < 50 ? "#f5a623" : "#0070f3" }}>
-                      {s.balance}
-                      <span style={{ fontSize: 12, fontWeight: "normal", color: "#888" }}> bags</span>
+                  <div key={s.product} style={{ background: "#f0f7ff", border: "1.5px solid #bfdbfe", borderRadius: 8, padding: "12px 14px" }}>
+                    <p style={{ margin: 0, fontSize: fontSize.xs, color: "#64748b" }}>{s.product}</p>
+                    <p style={{ margin: "6px 0 0", fontWeight: 700, fontSize: fontSize["2xl"], color: s.balance === 0 ? "#ef4444" : s.balance < 50 ? "#f5a623" : "#0070f3" }}>
+                      {s.balance}<span style={{ fontSize: fontSize.xs, fontWeight: 500, color: "#64748b", marginLeft: 4 }}>bags</span>
                     </p>
                   </div>
                 ))}
@@ -381,26 +771,33 @@ export default function StoreOfficerDashboard() {
         </div>
 
         {/* Tabs */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 24, flexWrap: "wrap" }}>
           {(["supply", "sales", "stock"] as const).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
               style={{
-                padding: "8px 20px", borderRadius: 20, fontSize: 13, cursor: "pointer",
-                border: "1px solid #ddd",
+                padding: "8px 16px",
+                borderRadius: 6,
+                fontSize: fontSize.sm,
+                cursor: "pointer",
+                border: `1.5px solid ${tab === t ? "" : "#e2e8f0"}`,
                 background: tab === t ? "#171717" : "white",
-                color: tab === t ? "white" : "#333",
-                fontWeight: tab === t ? "bold" : "normal",
-                position: "relative"
+                color: tab === t ? "white" : "#64748b",
+                fontWeight: tab === t ? 600 : 500,
+                transition: "all 0.2s",
+                position: "relative",
+                minHeight: 40,
               }}
+              onMouseEnter={e => { if (tab !== t) { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc" } }}
+              onMouseLeave={e => { if (tab !== t) { e.currentTarget.style.borderColor = "#e2e8f0"; e.currentTarget.style.background = "white" } }}
             >
               {t === "supply" ? "Supplies" : t === "sales" ? "Sales" : "Stock"}
               {t === "supply" && pendingStops.length > 0 && (
                 <span style={{
-                  position: "absolute", top: -6, right: -6,
-                  background: "#ff4444", color: "white", borderRadius: "50%",
-                  width: 18, height: 18, fontSize: 11, fontWeight: "bold",
+                  position: "absolute", top: -8, right: -8,
+                  background: "#ef4444", color: "white", borderRadius: "50%",
+                  width: 20, height: 20, fontSize: fontSize.xs, fontWeight: 700,
                   display: "flex", alignItems: "center", justifyContent: "center"
                 }}>
                   {pendingStops.length}
@@ -413,35 +810,37 @@ export default function StoreOfficerDashboard() {
         {/* Supply Tab */}
         {tab === "supply" && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <p style={{ margin: 0, fontWeight: "bold" }}>Pending Supplies ({pendingStops.length})</p>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 12, color: "#888" }}>
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", gap: 12, marginBottom: 16 }}>
+              <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>Pending Supplies ({pendingStops.length})</p>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: fontSize.xs, color: "#94a3b8" }}>
                 {lastUpdated && `Updated: ${lastUpdated.toLocaleTimeString()}`}
-                <button onClick={() => officer && fetchPendingStops(officer.store_name)} style={{ padding: "4px 12px", fontSize: 12, cursor: "pointer", borderRadius: 4, border: "1px solid #ddd", background: "white" }}>
+                <button onClick={() => officer && fetchPendingStops(officer.store_name)} style={{ padding: "6px 12px", fontSize: fontSize.xs, cursor: "pointer", borderRadius: 6, border: "1px solid #e2e8f0", background: "white", color: "#64748b", transition: "all 0.2s" }} onMouseEnter={e => { e.currentTarget.style.background = "#f8fafc"; e.currentTarget.style.borderColor = "#cbd5e1" }} onMouseLeave={e => { e.currentTarget.style.background = "white"; e.currentTarget.style.borderColor = "#e2e8f0" }}>
                   Refresh
                 </button>
               </div>
             </div>
 
-            {pendingStops.length === 0 && <p style={{ color: "#888" }}>No pending supplies.</p>}
+            {pendingStops.length === 0 && <p style={{ color: "#64748b", fontSize: fontSize.base }}>No pending supplies.</p>}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {pendingStops.map(stop => (
-                <div key={stop.stop_id} style={{ background: "white", border: "1px solid #eee", borderRadius: 10, padding: 20, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
+                <div key={stop.stop_id} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.05)", transition: "all 0.2s ease" }} onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)"; e.currentTarget.style.borderColor = "#cbd5e1" }} onMouseLeave={e => { e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.05)"; e.currentTarget.style.borderColor = "#e2e8f0" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                     <div>
-                      <p style={{ margin: 0, fontWeight: "bold", fontSize: 15 }}>{stop.plate_number}</p>
-                      <p style={{ margin: "4px 0 0", fontSize: 13, color: "#555" }}>{stop.driver_name}</p>
-                      <p style={{ margin: "4px 0 0", fontSize: 12, color: "#aaa" }}>{new Date(stop.stop_time).toLocaleString()}</p>
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>{stop.plate_number}</p>
+                      <p style={{ margin: "4px 0 0", fontSize: fontSize.sm, color: "#64748b" }}>{stop.driver_name}</p>
+                      <p style={{ margin: "4px 0 0", fontSize: fontSize.xs, color: "#94a3b8" }}>{new Date(stop.stop_time).toLocaleString()}</p>
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      <p style={{ margin: 0, fontSize: 12, color: "#888" }}>Bags delivered</p>
-                      <p style={{ margin: "2px 0 0", fontWeight: "bold", fontSize: 22, color: "#0070f3" }}>{stop.quantity_offloaded}</p>
+                      <p style={{ margin: "0 0 4px 0", fontSize: fontSize.xs, color: "#94a3b8" }}>Bags delivered</p>
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize["2xl"], color: "#0070f3" }}>{stop.quantity_offloaded}</p>
                     </div>
                   </div>
                   <button
                     onClick={() => { setConfirmingStop(stop); setSupplyLines([{ product: "", quantity: "" }]); setConfirmError("") }}
-                    style={{ width: "100%", padding: "10px 0", background: "#0070f3", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", fontSize: 14 }}
+                    style={{ width: "100%", padding: "10px 14px", background: "#0070f3", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44, transition: "opacity 0.2s" }}
+                    onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
+                    onMouseLeave={e => e.currentTarget.style.opacity = "1"}
                   >
                     Confirm Supply
                   </button>
@@ -454,84 +853,191 @@ export default function StoreOfficerDashboard() {
         {/* Sales Tab */}
         {tab === "sales" && (
           <div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {["All", ...uniqueProducts].map(f => (
+            <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", gap: 12, marginBottom: 16 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <button
+                  onClick={() => setSalesSortByAdded(!salesSortByAdded)}
+                  style={{
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    fontSize: fontSize.xs,
+                    cursor: "pointer",
+                    border: `1.5px solid #e2e8f0`,
+                    background: "white",
+                    color: "#64748b",
+                    fontWeight: 500,
+                    minHeight: 40,
+                    whiteSpace: "nowrap",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <Icon icon={salesSortByAdded ? "mdi:clock-outline" : "mdi:calendar"} width={14} />
+                  {salesSortByAdded ? "By date added" : "By sale date"}
+                </button>
+                <input
+                  type="date"
+                  value={salesDateFilter}
+                  onChange={e => setSalesDateFilter(e.target.value)}
+                  style={{ padding: "8px 12px", borderRadius: 8, border: `1.5px solid ${salesDateFilter ? "#0070f3" : "#e2e8f0"}`, fontSize: fontSize.sm, minHeight: 40, outline: "none", cursor: "pointer", background: salesDateFilter ? "rgba(0, 112, 243, 0.05)" : "white", color: "#0f172a" }}
+                />
+                {salesDateFilter && (
+                  <button onClick={() => setSalesDateFilter("")} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", fontSize: fontSize.sm, padding: "4px 8px", fontWeight: 600 }}>
+                    ✕ Clear
+                  </button>
+                )}
+                {["All", ...paymentFilters].map(f => (
                   <button
                     key={f}
                     onClick={() => setSalesFilter(f)}
                     style={{
-                      padding: "6px 14px", borderRadius: 20, fontSize: 13, cursor: "pointer",
-                      border: "1px solid #ddd",
-                      background: salesFilter === f ? "#0070f3" : "white",
-                      color: salesFilter === f ? "white" : "#333",
-                      fontWeight: salesFilter === f ? "bold" : "normal"
+                      padding: "8px 14px",
+                      borderRadius: 20,
+                      fontSize: fontSize.sm,
+                      cursor: "pointer",
+                      border: `1.5px solid ${salesFilter === f ? "#0070f3" : "#e2e8f0"}`,
+                      background: salesFilter === f ? "rgba(0, 112, 243, 0.1)" : "white",
+                      color: salesFilter === f ? "#0070f3" : "#64748b",
+                      fontWeight: salesFilter === f ? 600 : 500,
+                      transition: "all 0.2s",
+                      minHeight: 40
                     }}
+                    onMouseEnter={e => { if (salesFilter !== f) { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc" } }}
+                    onMouseLeave={e => { if (salesFilter !== f) { e.currentTarget.style.borderColor = "#e2e8f0"; e.currentTarget.style.background = "white" } }}
                   >
                     {f}
                   </button>
                 ))}
               </div>
               <button
-                onClick={() => { setShowSaleModal(true); setSaleError("") }}
-                style={{ padding: "8px 16px", background: "#0070f3", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold", fontSize: 13 }}
+                onClick={() => { setShowSaleModal(true); setSaleError(""); setIsBrokerLinked(false); setSaleBroker(null) }}
+                style={{ padding: "8px 16px", background: "#0070f3", color: "white", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 40, whiteSpace: "nowrap", transition: "opacity 0.2s" }}
+                onMouseEnter={e => e.currentTarget.style.opacity = "0.9"}
+                onMouseLeave={e => e.currentTarget.style.opacity = "1"}
               >
                 + Log Sale
               </button>
             </div>
 
-            {filteredSales.length === 0 && <p style={{ color: "#888" }}>No sales logged yet.</p>}
+            {filteredSales.length === 0 && <p style={{ color: "#64748b", fontSize: fontSize.base }}>No sales logged yet.</p>}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {filteredSales.map(sale => (
-                <div key={sale.sale_id} style={{ background: "white", border: "1px solid #eee", borderRadius: 10, padding: 20, boxShadow: "0 2px 8px rgba(0,0,0,0.04)" }}>
+              {filteredSales.map(sale => {
+                const totalAmount = sale.lines.reduce((sum, line) => sum + (line.total_amount ?? 0), 0)
+                const hasBrokerPricing = sale.lines.some(line => line.price_per_bag === null)
+
+                return (
+                <div key={sale.group_id} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.05)", transition: "all 0.2s ease" }} onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.08)"; e.currentTarget.style.borderColor = "#cbd5e1" }} onMouseLeave={e => { e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.05)"; e.currentTarget.style.borderColor = "#e2e8f0" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-                    <div>
-                      <p style={{ margin: 0, fontWeight: "bold", fontSize: 15 }}>{sale.product}</p>
-                      {sale.customer_name && <p style={{ margin: "4px 0 0", fontSize: 13, color: "#555" }}>{sale.customer_name}</p>}
-                      <p style={{ margin: "4px 0 0", fontSize: 12, color: "#aaa" }}>{new Date(sale.sold_at).toLocaleString()}</p>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>
+                        {sale.lines.length === 1 ? sale.lines[0].product : `${sale.lines.length} products`}
+                      </p>
+                      {sale.customer_name && <p style={{ margin: "4px 0 0", fontSize: fontSize.sm, color: "#64748b" }}>{sale.customer_name}</p>}
+                      {sale.broker_name && <p style={{ margin: "4px 0 0", fontSize: fontSize.sm, color: "#0070f3", fontWeight: 500 }}>Broker: {sale.broker_name}</p>}
+                      <p style={{ margin: "4px 0 0", fontSize: fontSize.xs, color: "#94a3b8" }}>{new Date(sale.sold_at).toLocaleString()}</p>
                     </div>
                     <div style={{ textAlign: "right" }}>
-                      <p style={{ margin: 0, fontWeight: "bold", fontSize: 18, color: "#00aa00" }}>₦{sale.total_amount.toLocaleString()}</p>
-                      <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 10, background: "#f0f0f0", color: "#555" }}>{sale.payment_mode}</span>
+                      {!hasBrokerPricing ? (
+                        <>
+                          <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#16a34a" }}>₦{totalAmount.toLocaleString()}</p>
+                          <span style={{ fontSize: fontSize.xs, padding: "3px 8px", borderRadius: 6, background: "#f0f7ff", color: "#0070f3", fontWeight: 600, display: "inline-block", marginTop: 4 }}>{sale.payment_mode}</span>
+                        </>
+                      ) : (
+                        <>
+                          <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: "#94a3b8", fontStyle: "italic" }}>Provided by broker</p>
+                          <span style={{ fontSize: fontSize.xs, padding: "3px 8px", borderRadius: 6, background: "#f0f7ff", color: "#0070f3", fontWeight: 600, display: "inline-block", marginTop: 4 }}>{sale.payment_mode}</span>
+                        </>
+                      )}
                     </div>
                   </div>
-                  {/* Sale Type */}
-                  <div style={{ background: sale.sale_type === "tricycle" ? "#f0f7ff" : "#f9f9f9", borderRadius: 6, padding: "8px 12px", marginBottom: 8 }}>
-                    <p style={{ margin: 0, fontSize: 11, color: "#888" }}>Sale Type</p>
-                    <p style={{ margin: 0, fontWeight: "bold", fontSize: 13, color: sale.sale_type === "tricycle" ? "#0070f3" : "#333" }}>
-                      {sale.sale_type === "tricycle" && sale.tricycle_number
-                        ? `🛺 ${sale.tricycle_number}`
-                        : "Direct to customer"}
-                    </p>
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div style={{ background: "#f9f9f9", borderRadius: 6, padding: "8px 12px" }}>
-                      <p style={{ margin: 0, fontSize: 11, color: "#888" }}>Bags Sold</p>
-                      <p style={{ margin: 0, fontWeight: "bold" }}>{sale.quantity}</p>
+
+                  {/* Status Badge */}
+                  {sale.broker_id && (
+                    <div style={{ background: "#f8fafc", borderRadius: 8, padding: "10px 12px", marginBottom: 10, border: "1px solid #e2e8f0" }}>
+                      <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>Status</p>
+                      <span style={{
+                        fontSize: fontSize.xs,
+                        padding: "4px 10px",
+                        borderRadius: 6,
+                        background: sale.status === "Pending" ? "#fffbeb" : sale.status === "Confirmed" ? "#ecfdf5" : "#fef2f2",
+                        color: getStatusColor(sale.status),
+                        fontWeight: 600,
+                        display: "inline-block",
+                        marginTop: 4
+                      }}>
+                        {sale.status}
+                      </span>
                     </div>
-                    <div style={{ background: "#f9f9f9", borderRadius: 6, padding: "8px 12px" }}>
-                      <p style={{ margin: 0, fontSize: 11, color: "#888" }}>Price/Bag</p>
-                      <p style={{ margin: 0, fontWeight: "bold" }}>₦{sale.price_per_bag.toLocaleString()}</p>
-                    </div>
+                  )}
+
+                  {/* Delivery Mode */}
+                  {(() => {
+                    const deliveryModeConfig: Record<string, { label: string; icon: string; bg: string; border: string; color: string }> = {
+                      self: { label: "Self", icon: "mdi:account", bg: "#f0fdf4", border: "#bbf7d0", color: "#16a34a" },
+                      tricycle: { label: sale.tricycle_number || "Tricycle", icon: "mdi:rickshaw", bg: "#eff6ff", border: "#bfdbfe", color: "#0070f3" },
+                      truck: { label: sale.truck_plate || "Truck", icon: "mdi:truck", bg: "#fefce8", border: "#fde68a", color: "#ca8a04" },
+                    }
+                    const cfg = deliveryModeConfig[sale.delivery_mode]
+                    if (!cfg) return null
+                    return (
+                      <div style={{ background: cfg.bg, borderRadius: 8, padding: "10px 12px", marginBottom: 10, border: `1px solid ${cfg.border}` }}>
+                        <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>Delivery Mode</p>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                          <Icon icon={cfg.icon} width={18} height={18} color={cfg.color} />
+                          <p style={{ margin: 0, fontWeight: 600, fontSize: fontSize.base, color: cfg.color }}>
+                            {cfg.label}
+                          </p>
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {sale.lines.map(line => (
+                      <div key={line.sale_id} style={{ display: "grid", gridTemplateColumns: line.price_per_bag !== null ? "1.4fr 0.7fr 0.9fr" : "1.4fr 0.7fr", gap: 8 }}>
+                        <div style={{ background: "#f8fafc", borderRadius: 8, padding: "8px 12px" }}>
+                          <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>Product</p>
+                          <p style={{ margin: "2px 0 0", fontWeight: 600, fontSize: fontSize.base, color: "#0f172a" }}>
+                            {line.product}
+                          </p>
+                        </div>
+                        <div style={{ background: "#f8fafc", borderRadius: 8, padding: "8px 12px" }}>
+                          <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>Bags</p>
+                          <p style={{ margin: "2px 0 0", fontWeight: 600, fontSize: fontSize.base, color: "#0f172a" }}>
+                            {line.quantity}
+                          </p>
+                        </div>
+                        {line.price_per_bag !== null && (
+                          <div style={{ background: "#f8fafc", borderRadius: 8, padding: "8px 12px" }}>
+                            <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>Price/Bag</p>
+                            <p style={{ margin: "2px 0 0", fontWeight: 600, fontSize: fontSize.base, color: "#0f172a" }}>
+                              ₦{line.price_per_bag.toLocaleString()}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}
 
-        {/* Stock History Tab */}
+        {/* Stock Tab */}
         {tab === "stock" && (
           <div>
-            <p style={{ fontWeight: "bold", marginBottom: 16 }}>Current Stock by Product</p>
-            {stock.length === 0 && <p style={{ color: "#888" }}>No stock data yet.</p>}
+            <p style={{ margin: "0 0 16px 0", fontWeight: 700, fontSize: fontSize.lg, color: "#0f172a" }}>Current Stock</p>
+            {stock.length === 0 && <p style={{ color: "#64748b", fontSize: fontSize.base }}>No stock data yet.</p>}
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {stock.map(s => (
-                <div key={s.product} style={{ background: "white", border: "1px solid #eee", borderRadius: 10, padding: "14px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <p style={{ margin: 0, fontWeight: "bold", fontSize: 15 }}>{s.product}</p>
-                  <p style={{ margin: 0, fontWeight: "bold", fontSize: 20, color: s.balance === 0 ? "#ff4444" : s.balance < 50 ? "#f5a623" : "#0070f3" }}>
-                    {s.balance} <span style={{ fontSize: 13, fontWeight: "normal", color: "#888" }}>bags</span>
+                <div key={s.product} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <p style={{ margin: 0, fontWeight: 600, fontSize: fontSize.lg, color: "#0f172a" }}>{s.product}</p>
+                  <p style={{ margin: 0, fontWeight: 700, fontSize: fontSize.lg, color: s.balance === 0 ? "#ef4444" : s.balance < 50 ? "#f5a623" : "#0070f3" }}>
+                    {s.balance} <span style={{ fontSize: fontSize.sm, fontWeight: 500, color: "#64748b", marginLeft: 4 }}>bags</span>
                   </p>
                 </div>
               ))}
@@ -542,27 +1048,27 @@ export default function StoreOfficerDashboard() {
 
       {/* Confirm Supply Modal */}
       {confirmingStop && (
-        <div onClick={() => { setConfirmingStop(null); setSupplyLines([{ product: "", quantity: "" }]); setConfirmError("") }} style={overlay}>
-          <div onClick={e => e.stopPropagation()} style={{ ...modal, width: 500 }}>
-            <h3 style={{ marginBottom: 4 }}>Confirm Supply</h3>
-            <p style={{ color: "#888", fontSize: 13, marginBottom: 4 }}>
+        <div onClick={() => { setConfirmingStop(null); setSupplyLines([{ product: "", quantity: "" }]); setConfirmError("") }} style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.6)", backdropFilter: "blur(4px)", display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center", zIndex: 100, padding: isMobile ? 0 : 24 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: isMobile ? "20px 20px 0 0" : 12, padding: isMobile ? "28px 20px" : 32, width: "100%", maxWidth: 480, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)" }}>
+            <h3 style={{ margin: "0 0 6px 0", fontSize: fontSize.xl, fontWeight: 700, color: "#0f172a" }}>Confirm Supply</h3>
+            <p style={{ color: "#94a3b8", fontSize: fontSize.sm, margin: "0 0 4px 0" }}>
               {confirmingStop.plate_number} · {confirmingStop.driver_name}
             </p>
-            <p style={{ color: "#555", fontSize: 13, marginBottom: 20 }}>
-              Total bags delivered: <strong>{confirmingStop.quantity_offloaded}</strong>
+            <p style={{ color: "#64748b", fontSize: fontSize.sm, margin: "0 0 20px 0" }}>
+              Total: <strong>{confirmingStop.quantity_offloaded} bags</strong>
             </p>
 
-            <p style={{ fontWeight: "bold", fontSize: 14, marginBottom: 8 }}>Breakdown by Product *</p>
-            <p style={{ fontSize: 12, color: "#888", marginBottom: 12 }}>Total must equal bags delivered</p>
+            <p style={{ fontWeight: 700, fontSize: fontSize.base, margin: "0 0 4px 0", color: "#0f172a" }}>Breakdown by Product *</p>
+            <p style={{ fontSize: fontSize.xs, color: "#94a3b8", margin: "0 0 12px 0" }}>Total must equal bags delivered</p>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
               {supplyLines.map((line, i) => (
-                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", width: "100%" }}>
                   <ModernInput
                     as="select"
                     value={line.product}
                     onChange={e => updateSupplyLine(i, "product", e.target.value)}
-                    style={{ flex: 2, padding: 10, borderRadius: 6, border: "1px solid #ddd", fontSize: 14 }}
+                    style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box" }}
                   >
                     <option value="">Select product</option>
                     {allProducts.map(p => (<option key={p} value={p}>{p}</option>))}
@@ -572,38 +1078,32 @@ export default function StoreOfficerDashboard() {
                     placeholder="Qty"
                     value={line.quantity}
                     onChange={e => updateSupplyLine(i, "quantity", e.target.value)}
-                    style={{ flex: 1, padding: 10, borderRadius: 6, border: "1px solid #ddd", fontSize: 14 }}
+                    style={{ flex: 1, width: isMobile ? 90 : 110, flexShrink: 0, padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box" }}
                   />
                   {supplyLines.length > 1 && (
-                    <button onClick={() => removeSupplyLine(i)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ff4444", fontSize: 18, lineHeight: 1 }}>✕</button>
+                    <button onClick={() => removeSupplyLine(i)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", fontSize: 18, lineHeight: 1, padding: 0, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
                   )}
                 </div>
               ))}
             </div>
 
-            {/* Running total */}
-            <div style={{ padding: "8px 12px", background: "#f9f9f9", borderRadius: 6, marginBottom: 16 }}>
-              <p style={{ margin: 0, fontSize: 13 }}>
-                Total entered: <strong style={{
-                  color: supplyLines.reduce((s, l) => s + (parseInt(l.quantity) || 0), 0) === confirmingStop.quantity_offloaded ? "#00aa00" : "#f5a623"
-                }}>
+            <div style={{ padding: "8px 12px", background: "#f8fafc", borderRadius: 6, marginBottom: 16, border: "1px solid #e2e8f0" }}>
+              <p style={{ margin: 0, fontSize: fontSize.sm, color: "#0f172a" }}>
+                Total entered: <strong style={{ color: supplyLines.reduce((s, l) => s + (parseInt(l.quantity) || 0), 0) === confirmingStop.quantity_offloaded ? "#16a34a" : "#f5a623" }}>
                   {supplyLines.reduce((s, l) => s + (parseInt(l.quantity) || 0), 0)}
                 </strong> / {confirmingStop.quantity_offloaded}
               </p>
             </div>
 
-            <button
-              onClick={addSupplyLine}
-              style={{ width: "100%", padding: "8px 0", background: "white", border: "1px dashed #0070f3", color: "#0070f3", borderRadius: 6, cursor: "pointer", fontSize: 13, marginBottom: 20 }}
-            >
+            <button onClick={addSupplyLine} style={{ width: "100%", padding: "8px 12px", background: "white", border: "1px dashed #0070f3", color: "#0070f3", borderRadius: 6, cursor: "pointer", fontSize: fontSize.sm, fontWeight: 600, marginBottom: 20, minHeight: 40 }}>
               + Add Product Line
             </button>
 
-            {confirmError && <p style={{ color: "red", fontSize: 13, marginBottom: 12 }}>{confirmError}</p>}
+            {confirmError && <div style={{ padding: 12, background: "#fef2f2", borderLeft: "4px solid #ef4444", borderRadius: 4, marginBottom: 16, color: "#b91c1c", fontSize: fontSize.sm }}>{confirmError}</div>}
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => { setConfirmingStop(null); setSupplyLines([{ product: "", quantity: "" }]); setConfirmError("") }} style={cancelBtn}>Cancel</button>
-              <button onClick={handleConfirmSupply} disabled={confirmLoading} style={primaryBtn}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button onClick={() => { setConfirmingStop(null); setSupplyLines([{ product: "", quantity: "" }]); setConfirmError("") }} style={{ padding: "12px 16px", background: "white", border: "1px solid #cbd5e1", color: "#475569", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44 }}>Cancel</button>
+              <button onClick={handleConfirmSupply} disabled={confirmLoading} style={{ padding: "12px 16px", background: "#0070f3", color: "white", border: "none", borderRadius: 8, cursor: confirmLoading ? "not-allowed" : "pointer", fontWeight: 600, fontSize: fontSize.md, opacity: confirmLoading ? 0.7 : 1, minHeight: 44 }}>
                 {confirmLoading ? "Confirming..." : "Confirm Supply"}
               </button>
             </div>
@@ -613,54 +1113,193 @@ export default function StoreOfficerDashboard() {
 
       {/* Log Sale Modal */}
       {showSaleModal && (
-        <div onClick={() => { setShowSaleModal(false); setSaleProduct(""); setSaleQty(""); setSalePrice(""); setSaleCustomer(null); setSalePayment(""); setSaleType("direct"); setSaleTricycleId(""); setTricycleSearch(""); setSaleError("") }} style={overlay}>
-          <div onClick={e => e.stopPropagation()} style={modal}>
-            <h3 style={{ marginBottom: 20 }}>Log Sale</h3>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Product *</label>
-              <ModernInput
-                as="select"
-                value={saleProduct}
-                onChange={e => { setSaleProduct(e.target.value); setSaleError("") }}
-                style={inputStyle}
-              >
-                <option value="">Select product</option>
-                {stock.filter(s => s.balance > 0).map(s => (
-                  <option key={s.product} value={s.product}>{s.product} ({s.balance} bags available)</option>
-                ))}
-              </ModernInput>
+        <div onClick={() => { 
+          setShowSaleModal(false)
+          setSaleLines([{ product: "", quantity: "", price_per_bag: "" }])
+          setSaleCustomer(null)
+          setSalePayment("")
+          setSaleError("")
+          setDeliveryMode("self")
+          setSaleTricycleId("")
+          setTricycleSearch("")
+          setSaleTruckPlate("")
+          setTruckSearch("")
+          setIsBrokerLinked(false)
+          setSaleBroker(null)
+          setBrokerSearch("")
+          setSaleDate(new Date().toISOString().split("T")[0])
+        }} style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.6)", backdropFilter: "blur(4px)", display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center", zIndex: 100, padding: isMobile ? 0 : 24 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: isMobile ? "20px 20px 0 0" : 12, padding: isMobile ? "28px 20px" : 32, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)" }}>
+            <h3 style={{ margin: "0 0 20px 0", fontSize: fontSize.xl, fontWeight: 700, color: "#0f172a" }}>Log Sales</h3>
+      
+            {/* Broker Linked Toggle */}
+            <div style={{ marginBottom: 20, padding: "12px", background: "#f0f7ff", borderRadius: 8, border: "1px solid #bfdbfe" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={isBrokerLinked}
+                  onChange={e => { setIsBrokerLinked(e.target.checked); setSaleBroker(null); setSaleError("") }}
+                  style={{ width: 18, height: 18, cursor: "pointer" }}
+                />
+                <span style={{ margin: "4px 0 0", fontWeight: 600, color: "#0070f3", fontSize: fontSize.sm }}>Broker-linked sales</span>
+              </label>
+              <p style={{ margin: "6px 0 0", fontSize: fontSize.xs, color: "#64748b" }}>
+                {isBrokerLinked ? "Broker will provide the prices" : ""}
+              </p>
             </div>
-
-            {/* Sale Type Toggle */}
+      
+            {/* Products Section */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <label style={{ fontWeight: 700, fontSize: fontSize.base, color: "#0f172a" }}>Products *</label>
+                <p style={{ margin: 0, fontSize: fontSize.xs, color: "#94a3b8" }}>{saleLines.length} product(s)</p>
+              </div>
+      
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+                {saleLines.map((line, i) => (
+                  <div key={i} style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "2fr 1fr " + (isBrokerLinked ? "0fr" : "1fr") + " auto", gap: 8, alignItems: "center" }}>
+                    {/* Product Select */}
+                    <ModernInput
+                      as="select"
+                      value={line.product}
+                      onChange={e => updateSaleLine(i, "product", e.target.value)}
+                      style={{ padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box", minHeight: 44 }}
+                    >
+                      <option value="">Select product</option>
+                      {stock.filter(s => s.balance > 0).map(s => (
+                        <option key={s.product} value={s.product}>{s.product} ({s.balance})</option>
+                      ))}
+                    </ModernInput>
+      
+                    {/* Quantity */}
+                    <ModernInput
+                      type="number"
+                      placeholder="Qty"
+                      value={line.quantity}
+                      onChange={e => updateSaleLine(i, "quantity", e.target.value)}
+                      style={{ padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box", minHeight: 44 }}
+                    />
+      
+                    {/* Price (self / truck / non-broker tricycle) */}
+                    {!isBrokerLinked && (
+                      <ModernInput
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Price per bag"
+                        value={line.price_per_bag}
+                        onChange={e => updateSaleLine(i, "price_per_bag", formatAmount(e.target.value))}
+                        style={{ padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.sm, boxSizing: "border-box", minHeight: 44 }}
+                      />
+                    )}
+      
+                    {/* Remove Button */}
+                    {saleLines.length > 1 && (
+                      <button onClick={() => removeSaleLine(i)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ef4444", fontSize: 18, lineHeight: 1, padding: 0, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+      
+              <button onClick={addSaleLine} style={{ width: "100%", padding: "8px 12px", background: "white", border: "1px dashed #0070f3", color: "#0070f3", borderRadius: 6, cursor: "pointer", fontSize: fontSize.sm, fontWeight: 600, minHeight: 40 }}>
+                + Add Another Product
+              </button>
+            </div>
+      
+            {/* Broker Selection (if broker-linked) */}
+            {isBrokerLinked && (
+              <div style={{ marginBottom: 16, position: "relative" }}>
+                <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Broker *</label>
+                {brokers.length === 0
+                  ? <p style={{ fontSize: fontSize.sm, color: "#94a3b8", margin: 0 }}>No brokers available.</p>
+                  : (
+                    <div style={{ position: "relative" }}>
+                      <ModernInput
+                        type="text"
+                        placeholder="Search broker…"
+                        value={brokerSearch}
+                        onChange={e => { setBrokerSearch(e.target.value); setBrokerDropOpen(true) }}
+                        onFocus={() => setBrokerDropOpen(true)}
+                        onBlur={() => setTimeout(() => setBrokerDropOpen(false), 150)}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.base, boxSizing: "border-box", minHeight: 44 }}
+                      />
+                      {brokerDropOpen && (
+                        <ul style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "white", border: "1px solid #e2e8f0", borderRadius: 8, listStyle: "none", margin: 0, padding: 4, maxHeight: 200, overflowY: "auto", zIndex: 50, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}>
+                          {brokers
+                            .filter(b => b.broker_name.toLowerCase().includes(brokerSearch.toLowerCase()))
+                            .map(b => (
+                              <li
+                                key={b.broker_id}
+                                onMouseDown={() => { setSaleBroker(b); setBrokerSearch(b.broker_name); setBrokerDropOpen(false); setSaleError("") }}
+                                style={{ padding: "10px 12px", cursor: "pointer", fontSize: fontSize.base, background: saleBroker?.broker_id === b.broker_id ? "#eff6ff" : "white", borderRadius: 6, transition: "all 0.2s" }}
+                                onMouseEnter={e => { if (saleBroker?.broker_id !== b.broker_id) e.currentTarget.style.background = "#f8fafc" }}
+                                onMouseLeave={e => { e.currentTarget.style.background = saleBroker?.broker_id === b.broker_id ? "#eff6ff" : "white" }}
+                              >
+                                {b.broker_name}
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    </div>
+                  )
+                }
+                {saleBroker && (
+                  <div style={{ marginTop: 8, padding: "8px 12px", background: "#eff6ff", borderRadius: 6, fontSize: fontSize.sm, color: "#0070f3", fontWeight: 500 }}>
+                    Selected: {saleBroker.broker_name}
+                  </div>
+                )}
+              </div>
+            )}
+      
+            {/* Customer Name (optional) */}
             <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Sale Type *</label>
-              <div style={{ display: "flex", gap: 8 }}>
-                {(["direct", "tricycle"] as const).map(type => (
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Customer Name <span style={{ fontWeight: 400, color: "#94a3b8" }}>(optional)</span></label>
+              <CustomerSelector 
+                onSelect={(c: any) => { setSaleCustomer(c); setSaleError("") }} 
+                allowUnsavedNew={true}
+                initialValue={saleCustomer?.full_name || ""}
+              />
+              {saleCustomer && (
+                <div style={{ marginTop: 8, padding: "8px 12px", background: "#eff6ff", borderRadius: 6, fontSize: fontSize.sm, color: "#0070f3", fontWeight: 500 }}>
+                  Selected: {saleCustomer.full_name}
+                </div>
+              )}
+            </div>
+      
+            {/* Delivery Mode */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Delivery Mode</label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                {(["self", "tricycle", "truck"] as const).map(type => (
                   <button
                     key={type}
-                    onClick={() => { setSaleType(type); setSaleTricycleId(""); setSaleError("") }}
+                    onClick={() => { setDeliveryMode(type); setSaleTricycleId(""); setSaleTruckPlate(""); setTruckSearch(""); setSaleError("") }}
                     style={{
-                      flex: 1, padding: "10px 0", borderRadius: 8, cursor: "pointer",
-                      border: `1.5px solid ${saleType === type ? "#0070f3" : "#ddd"}`,
-                      background: saleType === type ? "#0070f3" : "white",
-                      color: saleType === type ? "white" : "#555",
-                      fontWeight: saleType === type ? "bold" : "normal",
-                      fontSize: 14, minHeight: 44,
+                      padding: "10px 12px",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      border: `1.5px solid ${deliveryMode === type ? "#0070f3" : "#e2e8f0"}`,
+                      background: deliveryMode === type ? "#0070f3" : "white",
+                      color: deliveryMode === type ? "white" : "#64748b",
+                      fontWeight: deliveryMode === type ? 600 : 500,
+                      fontSize: fontSize.sm,
+                      minHeight: 44,
+                      transition: "all 0.2s"
                     }}
+                    onMouseEnter={e => { if (deliveryMode !== type) { e.currentTarget.style.borderColor = "#cbd5e1"; e.currentTarget.style.background = "#f8fafc" } }}
+                    onMouseLeave={e => { if (deliveryMode !== type) { e.currentTarget.style.borderColor = "#e2e8f0"; e.currentTarget.style.background = "white" } }}
                   >
-                    {type === "direct" ? "Direct Sale" : "Tricycle"}
+                    {type === "self" ? "Self" : type === "truck" ? "Truck" : "Tricycle"}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Tricycle selector — only when tricycle selected */}
-            {saleType === "tricycle" && (
+            {/* Tricycle Selection */}
+            {deliveryMode === "tricycle" && (
               <div style={{ marginBottom: 16, position: "relative" }}>
-                <label style={labelStyle}>Tricycle *</label>
+                <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Tricycle *</label>
                 {tricycles.length === 0
-                  ? <p style={{ fontSize: 13, color: "#888", marginTop: 4 }}>No tricycles available.</p>
+                  ? <p style={{ fontSize: fontSize.sm, color: "#94a3b8", margin: 0 }}>No tricycles available.</p>
                   : (
                     <div style={{ position: "relative" }}>
                       <ModernInput
@@ -670,32 +1309,18 @@ export default function StoreOfficerDashboard() {
                         onChange={e => { setTricycleSearch(e.target.value); setTricycleDropOpen(true) }}
                         onFocus={() => setTricycleDropOpen(true)}
                         onBlur={() => setTimeout(() => setTricycleDropOpen(false), 150)}
-                        style={inputStyle}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.base, boxSizing: "border-box", minHeight: 44 }}
                       />
                       {tricycleDropOpen && (
-                        <ul style={{
-                          position: "absolute", top: "100%", left: 0, right: 0,
-                          background: "white", border: "1px solid #ddd", borderRadius: 6,
-                          listStyle: "none", margin: 0, padding: 0,
-                          maxHeight: 200, overflowY: "auto", zIndex: 10,
-                          boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
-                        }}>
+                        <ul style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "white", border: "1px solid #e2e8f0", borderRadius: 8, listStyle: "none", margin: 0, padding: 4, maxHeight: 200, overflowY: "auto", zIndex: 50, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}>
                           {tricycles
                             .filter(t => t.tricycle_number.toLowerCase().includes(tricycleSearch.toLowerCase()))
                             .map(t => (
                               <li
                                 key={t.tricycle_id}
-                                onMouseDown={() => {
-                                  setSaleTricycleId(t.tricycle_id)
-                                  setTricycleSearch(t.tricycle_number)
-                                  setTricycleDropOpen(false)
-                                  setSaleError("")
-                                }}
-                                style={{
-                                  padding: "10px 12px", cursor: "pointer", fontSize: 14,
-                                  background: saleTricycleId === t.tricycle_id ? "#eff6ff" : "white"
-                                }}
-                                onMouseEnter={e => { if (saleTricycleId !== t.tricycle_id) e.currentTarget.style.background = "#f5f5f5" }}
+                                onMouseDown={() => { setSaleTricycleId(t.tricycle_id); setTricycleSearch(t.tricycle_number); setTricycleDropOpen(false); setSaleError("") }}
+                                style={{ padding: "10px 12px", cursor: "pointer", fontSize: fontSize.base, background: saleTricycleId === t.tricycle_id ? "#eff6ff" : "white", borderRadius: 6, transition: "all 0.2s" }}
+                                onMouseEnter={e => { if (saleTricycleId !== t.tricycle_id) e.currentTarget.style.background = "#f8fafc" }}
                                 onMouseLeave={e => { e.currentTarget.style.background = saleTricycleId === t.tricycle_id ? "#eff6ff" : "white" }}
                               >
                                 {t.tricycle_number}
@@ -708,75 +1333,211 @@ export default function StoreOfficerDashboard() {
                 }
               </div>
             )}
-
+      
+            {/* Truck Selection */}
+            {deliveryMode === "truck" && (
+              <div style={{ marginBottom: 16, position: "relative" }}>
+                <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Truck *</label>
+                {trucks.length === 0
+                  ? <p style={{ fontSize: fontSize.sm, color: "#94a3b8", margin: 0 }}>No trucks available.</p>
+                  : (
+                    <div style={{ position: "relative" }}>
+                      <ModernInput
+                        type="text"
+                        placeholder="Search truck…"
+                        value={truckSearch}
+                        onChange={e => { setTruckSearch(e.target.value); setTruckDropOpen(true) }}
+                        onFocus={() => setTruckDropOpen(true)}
+                        onBlur={() => setTimeout(() => setTruckDropOpen(false), 150)}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.base, boxSizing: "border-box", minHeight: 44 }}
+                      />
+                      {truckDropOpen && (
+                        <ul style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "white", border: "1px solid #e2e8f0", borderRadius: 8, listStyle: "none", margin: 0, padding: 4, maxHeight: 200, overflowY: "auto", zIndex: 50, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}>
+                          {trucks
+                            .filter(t => t.plate_number.toLowerCase().includes(truckSearch.toLowerCase()) || (t.kbnl_truck_no || "").toLowerCase().includes(truckSearch.toLowerCase()))
+                            .map(t => (
+                              <li
+                                key={t.plate_number}
+                                onMouseDown={() => { setSaleTruckPlate(t.plate_number); setTruckSearch(`${t.plate_number}${t.kbnl_truck_no ? ` · #${t.kbnl_truck_no}` : ""}`); setTruckDropOpen(false); setSaleError("") }}
+                                style={{ padding: "10px 12px", cursor: "pointer", fontSize: fontSize.base, background: saleTruckPlate === t.plate_number ? "#eff6ff" : "white", borderRadius: 6, transition: "all 0.2s" }}
+                                onMouseEnter={e => { if (saleTruckPlate !== t.plate_number) e.currentTarget.style.background = "#f8fafc" }}
+                                onMouseLeave={e => { e.currentTarget.style.background = saleTruckPlate === t.plate_number ? "#eff6ff" : "white" }}
+                              >
+                                {t.plate_number}{t.kbnl_truck_no ? ` · #${t.kbnl_truck_no}` : ""}
+                              </li>
+                            ))}
+                        </ul>
+                      )}
+                    </div>
+                  )
+                }
+                {saleTruckPlate && (
+                  <div style={{ marginTop: 8, padding: "8px 12px", background: "#fefce8", borderRadius: 6, fontSize: fontSize.sm, color: "#ca8a04", fontWeight: 500, border: "1px solid #fde68a" }}>
+                    Selected: {saleTruckPlate}
+                  </div>
+                )}
+              </div>
+            )}
+      
+            {/* Sale Date */}
             <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Quantity (bags) *</label>
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Date of Sale</label>
               <ModernInput
-                type="number"
-                placeholder="e.g. 50"
-                value={saleQty}
-                onChange={e => { setSaleQty(e.target.value); setSaleError("") }}
-                style={inputStyle}
+                type="date"
+                value={saleDate}
+                onChange={e => { setSaleDate(e.target.value); setSaleError("") }}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.base, boxSizing: "border-box", minHeight: 44 }}
               />
             </div>
 
-            <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Price per Bag (₦) *</label>
-              <ModernInput
-                type="text"
-                inputMode="numeric"
-                placeholder="e.g. 12,000"
-                value={salePrice}
-                onChange={e => { setSalePrice(formatAmount(e.target.value)); setSaleError("") }}
-                style={inputStyle}
-              />
-            </div>
-
-            <div style={{ marginBottom: 16 }}>
-              <label style={labelStyle}>Customer Name *</label>
-              <CustomerSelector 
-                onSelect={(c: any) => { setSaleCustomer(c); setSaleError("") }} 
-                allowUnsavedNew={true}
-                initialValue={saleCustomer?.full_name || ""}
-              />
-              {saleCustomer && (
-                <div style={{ marginTop: 8, padding: "8px 12px", background: "#f0f7ff", borderRadius: 6, fontSize: 13, color: "#0070f3" }}>
-                  Selected: {saleCustomer.full_name}
-                </div>
-              )}
-            </div>
-
+            {/* Payment Mode */}
             <div style={{ marginBottom: 24 }}>
-              <label style={labelStyle}>Payment Mode *</label>
+              <label style={{ display: "block", fontWeight: 600, marginBottom: 6, fontSize: fontSize.sm, color: "#475569" }}>Payment Mode *</label>
               <ModernInput
                 as="select"
                 value={salePayment}
                 onChange={e => { setSalePayment(e.target.value); setSaleError("") }}
-                style={inputStyle}
+                style={{ width: "100%", padding: "10px 12px", borderRadius: 6, border: "1px solid #e0e0e0", fontSize: fontSize.base, boxSizing: "border-box", minHeight: 44 }}
               >
                 <option value="">Select payment mode</option>
                 {PAYMENT_MODES.map(m => (<option key={m} value={m}>{m}</option>))}
               </ModernInput>
             </div>
-
-            {saleError && <p style={{ color: "red", fontSize: 13, marginBottom: 12 }}>{saleError}</p>}
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => { setShowSaleModal(false); setSaleProduct(""); setSaleQty(""); setSalePrice(""); setSaleCustomer(null); setSalePayment(""); setSaleType("direct"); setSaleTricycleId(""); setTricycleSearch(""); setSaleError("") }} style={cancelBtn}>Cancel</button>
-              <button onClick={handleLogSale} disabled={saleLoading} style={primaryBtn}>
-                {saleLoading ? "Logging..." : "Log Sale"}
+      
+            {saleError && <div style={{ padding: 12, background: "#fef2f2", borderLeft: "4px solid #ef4444", borderRadius: 4, marginBottom: 16, color: "#b91c1c", fontSize: fontSize.sm }}>{saleError}</div>}
+      
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button onClick={() => { 
+                setShowSaleModal(false)
+                setSaleLines([{ product: "", quantity: "", price_per_bag: "" }])
+                setSaleCustomer(null)
+                setSalePayment("")
+                setSaleError("")
+                setDeliveryMode("self")
+                setSaleTricycleId("")
+                setTricycleSearch("")
+                setSaleTruckPlate("")
+                setTruckSearch("")
+                setIsBrokerLinked(false)
+                setSaleBroker(null)
+                setBrokerSearch("")
+                setSaleDate(new Date().toISOString().split("T")[0])
+              }} style={{ padding: "12px 16px", background: "white", border: "1px solid #cbd5e1", color: "#475569", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44 }}>Cancel</button>
+              <button onClick={handleLogSale} disabled={saleLoading} style={{ padding: "12px 16px", background: "#0070f3", color: "white", border: "none", borderRadius: 8, cursor: saleLoading ? "not-allowed" : "pointer", fontWeight: 600, fontSize: fontSize.md, opacity: saleLoading ? 0.7 : 1, minHeight: 44 }}>
+                {saleLoading ? "Logging..." : `Log ${saleLines.filter(l => l.product).length} Sale(s)`}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Profile Picture Upload Modal */}
+      {showPictureModal && (
+        <div onClick={() => { setShowPictureModal(false); setSelectedFile(null); setPicturePreview(null); setPictureError("") }} style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.6)", backdropFilter: "blur(4px)", display: "flex", alignItems: isMobile ? "flex-end" : "center", justifyContent: "center", zIndex: 100, padding: isMobile ? 0 : 24 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "white", borderRadius: isMobile ? "20px 20px 0 0" : 12, padding: isMobile ? "28px 20px" : 32, width: "100%", maxWidth: 420, maxHeight: "90vh", overflowY: "auto", boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.25)" }}>
+            <h3 style={{ margin: "0 0 6px 0", fontSize: fontSize.xl, fontWeight: 700, color: "#0f172a" }}>Update Profile Picture</h3>
+            <p style={{ margin: "0 0 20px 0", fontSize: fontSize.sm, color: "#64748b" }}>Click to upload or drag and drop. PNG, JPG up to 1MB.</p>
+
+            {picturePreview ? (
+              <div style={{ marginBottom: 20 }}>
+                <p style={{ margin: "0 0 8px 0", fontSize: fontSize.sm, fontWeight: 600, color: "#0f172a" }}>Preview</p>
+                <img
+                  src={picturePreview}
+                  alt="Preview"
+                  style={{
+                    width: "100%",
+                    height: 200,
+                    objectFit: "cover",
+                    borderRadius: 12,
+                    border: "2px solid #e2e8f0",
+                  }}
+                />
+              </div>
+            ) : (
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                style={{
+                  border: "1.5px dashed #0070f3",
+                  borderRadius: 12,
+                  padding: "32px 16px",
+                  cursor: "pointer",
+                  background: "#f0f7ff",
+                  transition: "all 0.2s",
+                  marginBottom: 20,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                onMouseEnter={e => {
+                  e.currentTarget.style.background = "#e0efff"
+                  e.currentTarget.style.borderColor = "#0055d4"
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = "#f0f7ff"
+                  e.currentTarget.style.borderColor = "#0070f3"
+                }}
+              >
+                <Icon icon="mdi:cloud-upload" width={40} height={40} color="#0070f3" style={{ marginBottom: 8 }} />
+                <p style={{ margin: "0 0 4px 0", fontSize: fontSize.base, fontWeight: 600, color: "#0070f3" }}>
+                  Click to upload
+                </p>
+                <p style={{ margin: 0, fontSize: fontSize.sm, color: "#64748b" }}>
+                  or drag and drop
+                </p>
+              </div>
+            )}
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleFileSelect}
+              style={{ display: "none" }}
+            />
+
+            {pictureError && (
+              <div style={{ padding: 12, background: "#fef2f2", borderLeft: "4px solid #ef4444", borderRadius: 4, marginBottom: 16, color: "#b91c1c", fontSize: fontSize.sm }}>
+                {pictureError}
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button
+                onClick={() => { setShowPictureModal(false); setSelectedFile(null); setPicturePreview(null); setPictureError("") }}
+                style={{ padding: "12px 16px", background: "white", border: "1px solid #cbd5e1", color: "#475569", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: fontSize.md, minHeight: 44 }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleUploadPicture}
+                disabled={pictureLoading || !selectedFile}
+                style={{
+                  padding: "12px 16px",
+                  background: selectedFile ? "#0070f3" : "#bfdbfe",
+                  color: "white",
+                  border: "none",
+                  borderRadius: 8,
+                  cursor: selectedFile && !pictureLoading ? "pointer" : "not-allowed",
+                  fontWeight: 600,
+                  fontSize: fontSize.md,
+                  minHeight: 44,
+                  opacity: pictureLoading ? 0.7 : 1,
+                }}
+              >
+                {pictureLoading ? "Uploading..." : "Upload"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ReportModal
+        isOpen={showReportModal}
+        onClose={() => setShowReportModal(false)}
+        userId={officer?.officer_id || ""}
+        userRole="StoreOfficer"
+      />
     </div>
   )
 }
-
-const overlay: React.CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }
-const modal: React.CSSProperties = { background: "white", borderRadius: 12, padding: 32, width: 420, maxWidth: "90vw", maxHeight: "85vh", overflowY: "auto", boxShadow: "0 8px 32px rgba(0,0,0,0.2)" }
-const labelStyle: React.CSSProperties = { display: "block", fontWeight: "bold", marginBottom: 6, fontSize: 14 }
-const inputStyle: React.CSSProperties = { width: "100%", padding: 10, boxSizing: "border-box", borderRadius: 6, border: "1px solid #ddd", fontSize: 14 }
-const primaryBtn: React.CSSProperties = { flex: 1, padding: "10px 0", background: "#0070f3", color: "white", border: "none", borderRadius: 6, cursor: "pointer", fontWeight: "bold" }
-const cancelBtn: React.CSSProperties = { flex: 1, padding: "10px 0", background: "white", border: "1px solid #ddd", borderRadius: 6, cursor: "pointer" }
